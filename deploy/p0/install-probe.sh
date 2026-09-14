@@ -88,6 +88,19 @@ fi
 install -m 0755 ./gnl-probe "$BIN"
 echo "==> installed $BIN"
 
+# The cron jobs write here. /var/lib is root-owned, so a crontab entry running as
+# an ordinary user could not create it - and the failure would be one EACCES per
+# tick into cron's local mail, which on most bare hosts goes nowhere. Create it
+# here, owned by whoever invoked sudo, so both root's crontab and that user's
+# crontab work.
+RESULTS_DIR="/var/lib/gnl"
+mkdir -p "$RESULTS_DIR"
+if [[ -n "${SUDO_USER:-}" ]]; then
+  chown "$SUDO_USER" "$RESULTS_DIR"
+fi
+chmod 0755 "$RESULTS_DIR"
+echo "==> results directory $RESULTS_DIR ready"
+
 if [[ "$MODE" == "client" ]]; then
   echo "==> client mode: nothing else to configure."
   echo "    Add cron entries with the campaign's target list; see docs/p0-runbook.md."

@@ -59,6 +59,10 @@ sudo ./install-probe.sh --mode server --allow <vn-viettel-ip>,<vn-vnpt-ip>,<vn-f
 sudo ./install-probe.sh --mode client
 ```
 
+Every address that will ever probe this host must be in this list. One missing
+client does not produce an error — it produces a week of total loss for that ISP,
+which reads like a terrible route rather than a closed port.
+
 Then add cron. Every 20 minutes, one 60-second run per landmark:
 
 ```cron
@@ -66,6 +70,12 @@ Then add cron. Every 20 minutes, one 60-second run per landmark:
   -leg C -from vps-sgp-vultr -to landmark-sgp -duration 60s \
   -out /var/lib/gnl/results.jsonl
 ```
+
+The installer has already created `/var/lib/gnl` and given it to the account that
+ran `sudo`, so either that account's crontab or root's will work. Do not paste
+these lines into `/etc/cron.d`: files there need an extra user field before the
+command, and without it cron reads `/usr/local/bin/gnl-probe` as a username and
+silently discards the entry.
 
 **On each Vietnamese measurement client.** First install the binary, exactly as on the VPS hosts. Client mode configures no
 firewall and no service; it only places `gnl-probe` where cron can find it:
@@ -84,6 +94,18 @@ Then add cron. One leg A run per landmark, and one leg B run per candidate VPS:
 */20 * * * * /usr/local/bin/gnl-probe client -target <vps-2-ip>:51830 \
   -leg B -from vn-viettel -to vps-sgp-digitalocean -duration 60s -out /var/lib/gnl/results.jsonl
 ```
+
+The block above is for the Viettel host. On the VNPT and FPT machines use the
+same three lines with `-from vn-vnpt` and `-from vn-fpt`. Changing `-from` is not
+cosmetic: the analysis groups every leg by that exact string, so a box that still
+says `vn-viettel` files its measurements under Viettel's baseline and the two
+ISPs blend into one candidate that looks complete and is wrong.
+
+The installer has already created `/var/lib/gnl` and given it to the account that
+ran `sudo`, so either that account's crontab or root's will work. Do not paste
+these lines into `/etc/cron.d`: files there need an extra user field before the
+command, and without it cron reads `/usr/local/bin/gnl-probe` as a username and
+silently discards the entry.
 
 Names in `-from` and `-to` must be **identical everywhere**. The analysis joins
 legs by those strings; a VPS called `vps-sgp-vultr` on one machine and
