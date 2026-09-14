@@ -43,15 +43,19 @@ it: every candidate VPS, plus every Vietnamese measurement client.
 
 ```bash
 sudo ./install-probe.sh --mode server \
-  --allow <vps-1-ip>,<vps-2-ip>,<vps-3-ip>,<vn-client-1-ip>,<vn-client-2-ip>
+  --allow <vps-1-ip>,<vps-2-ip>,<vps-3-ip>,<vn-viettel-ip>,<vn-vnpt-ip>,<vn-fpt-ip>
 ```
+
+Every address that will ever probe this host must be in this list. One missing
+client does not produce an error — it produces a week of total loss for that ISP,
+which reads like a terrible route rather than a closed port.
 
 **On each candidate VPS.** It is both an echo server (so Vietnamese clients can
 measure leg B against it) and a client (so it can measure leg C to the
 landmarks):
 
 ```bash
-sudo ./install-probe.sh --mode server --allow <vn-client-1-ip>,<vn-client-2-ip>
+sudo ./install-probe.sh --mode server --allow <vn-viettel-ip>,<vn-vnpt-ip>,<vn-fpt-ip>
 sudo ./install-probe.sh --mode client
 ```
 
@@ -63,8 +67,14 @@ Then add cron. Every 20 minutes, one 60-second run per landmark:
   -out /var/lib/gnl/results.jsonl
 ```
 
-**On each Vietnamese measurement client.** One leg A run per landmark, and one
-leg B run per candidate VPS:
+**On each Vietnamese measurement client.** First install the binary, exactly as on the VPS hosts. Client mode configures no
+firewall and no service; it only places `gnl-probe` where cron can find it:
+
+```bash
+sudo ./install-probe.sh --mode client
+```
+
+Then add cron. One leg A run per landmark, and one leg B run per candidate VPS:
 
 ```cron
 */20 * * * * /usr/local/bin/gnl-probe client -target <landmark-sgp-ip>:51830 \
@@ -126,14 +136,28 @@ cat vn-*/results.jsonl vps-*/results.jsonl > campaign.jsonl
 gnl-analyze -in campaign.jsonl
 ```
 
-The table has one row per **VPS and landmark pair**, because a provider can beat
-the ISP's route to Singapore while losing to Tokyo. Read the rows, not just the
-final verdict line.
+The table has one row per **ISP, VPS and landmark** combination. The same VPS
+appears once per ISP and once per landmark, and those rows can disagree: each ISP
+has its own baseline, so a provider can beat Viettel's route while losing to
+FPT's. Read the rows, not just the final verdict line.
 
-If the output begins with a `WARNING: N unparseable line(s) skipped`, a machine
+If the output contains, near the top, a `WARNING: N unparseable line(s) skipped`, a machine
 died mid-write at some point. A handful of torn lines out of thousands is normal
 and the rest of the campaign is still good. A large count means something else is
 wrong — check that every host wrote to a local disk rather than a network mount.
+
+The JITTER and LOSS columns show the worst single run of the week on either
+tunnel leg, not an average. One bad evening on a home connection can therefore
+fail an otherwise clean week — if a candidate fails only on these, look at
+whether it is one outlier before writing the provider off.
+
+The peak window is **19:00–23:00 Vietnam time (UTC+7)**, and `gnl-analyze` prints
+the window it used on every run. Records outside it are discarded entirely.
+
+Timezones cannot be got wrong here: every record carries an absolute UTC
+timestamp and the conversion happens at analysis time, so it does not matter what
+timezone any measuring host is set to. `-peak-start` and `-peak-end` change the
+window if you ever need a different one.
 
 A candidate passes only when all five hold at peak hours:
 
@@ -144,8 +168,8 @@ A candidate passes only when all five hold at peak hours:
 - at least 20 runs inside the peak window, counted on the **weaker** of the two
   tunnel legs
 
-Those thresholds are strict: a value sitting exactly on a bar fails. Six lost
-packets out of 1200 is exactly 0.5%, and that is a fail, not a pass.
+The three latency and loss thresholds are strict: a value sitting exactly on a bar fails. Six lost
+packets out of 1200 is exactly 0.5%, and that is a fail, not a pass. The run floor is a minimum: exactly 20 runs passes.
 
 The run floor exists because a median taken over one sample is not evidence. If a
 candidate reports too few runs, the verdict says so in its own words — "too
@@ -163,6 +187,10 @@ Exit code 0 means GO, exit code 1 means NO-GO.
 **At least one PASS.** Proceed to P1 with that provider. Record which one and
 what the numbers were: it becomes the baseline every later change is judged
 against.
+
+Record **which ISP and which landmark** it passed for, not just which provider. A
+PASS on one ISP's row is not a statement about the other two, and P1 inherits
+whatever you write down here.
 
 **Everything FAILS on latency.** The providers tried do not have a better path.
 Try more — different providers buy different transit, and this is the one
