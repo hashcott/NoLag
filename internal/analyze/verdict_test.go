@@ -1,6 +1,7 @@
 package analyze
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -27,6 +28,19 @@ func rec(ts time.Time, leg, from, to string, p50, p95, p99, loss float64) probe.
 // relaxedRuns drops the sample-size floor so a test can exercise the latency and
 // steadiness logic with one record per leg.
 func relaxedRuns(th Thresholds) Thresholds { th.MinRuns = 1; return th }
+
+// reasonsContain reports whether any reason mentions word. A failing test
+// should assert on the specific reason it is named after, not merely that
+// Pass is false: Pass == false cannot tell which check fired, so a broken
+// check could go unnoticed as long as some other check still fails.
+func reasonsContain(reasons []string, word string) bool {
+	for _, r := range reasons {
+		if strings.Contains(r, word) {
+			return true
+		}
+	}
+	return false
+}
 
 // Baseline 80ms; tunnel is 25 + 20 = 45ms. Clear win, clean legs.
 func TestEvaluatePassesAClearWin(t *testing.T) {
@@ -68,8 +82,8 @@ func TestEvaluateFailsOnJitter(t *testing.T) {
 	if got[0].Pass {
 		t.Error("Pass = true, want false: 18ms jitter is over the 10ms bar")
 	}
-	if len(got[0].Reasons) == 0 {
-		t.Error("a failing candidate must say why")
+	if !reasonsContain(got[0].Reasons, "jitter") {
+		t.Errorf("no reason mentions jitter; reasons were: %v", got[0].Reasons)
 	}
 }
 
@@ -87,6 +101,9 @@ func TestEvaluateFailsWhenTunnelIsSlower(t *testing.T) {
 	if got[0].GainMs != -15 {
 		t.Errorf("GainMs = %v, want -15", got[0].GainMs)
 	}
+	if !reasonsContain(got[0].Reasons, "slower") {
+		t.Errorf("no reason mentions the tunnel being slower; reasons were: %v", got[0].Reasons)
+	}
 }
 
 // Loss of 1.2% on leg C is over the 0.5% bar even though latency is excellent.
@@ -99,6 +116,9 @@ func TestEvaluateFailsOnLoss(t *testing.T) {
 	got := Evaluate(recs, DefaultThresholds(), 19, 23)
 	if got[0].Pass {
 		t.Error("Pass = true, want false: 1.2% loss is over the 0.5% bar")
+	}
+	if !reasonsContain(got[0].Reasons, "loss") {
+		t.Errorf("no reason mentions loss; reasons were: %v", got[0].Reasons)
 	}
 }
 
@@ -131,12 +151,17 @@ func TestEvaluateSkipsCandidateWithNoBaseline(t *testing.T) {
 		rec(vnTime(1, 20), "B", "vn-viettel", "vps-f", 25, 28, 31, 0.0),
 		rec(vnTime(1, 20), "C", "vps-f", "landmark-sgp", 20, 23, 26, 0.0),
 	}
-	got := Evaluate(recs, DefaultThresholds(), 19, 23)
+	got := Evaluate(recs, relaxedRuns(DefaultThresholds()), 19, 23)
 	if len(got) != 1 {
 		t.Fatalf("got %d candidates, want 1", len(got))
 	}
 	if got[0].Pass {
 		t.Error("Pass = true without any leg A baseline to compare against")
+	}
+	// Assert WHY. Without this the run-count floor, or any future check, could
+	// satisfy this test while the no-baseline branch quietly stopped working.
+	if !reasonsContain(got[0].Reasons, "baseline") {
+		t.Errorf("no reason mentions the missing baseline; reasons were: %v", got[0].Reasons)
 	}
 }
 
@@ -209,5 +234,28 @@ func TestEvaluateKeepsLandmarksApart(t *testing.T) {
 	}
 	if byLandmark["landmark-tyo"].Pass {
 		t.Error("Tokyo should fail; blending it with Singapore would hide that")
+	}
+}
+
+func TestEvaluateFailsWhenOneLegIsUndersampled(t *testing.T) {
+	// Leg B has plenty of runs; leg C has one. Half the verdict would rest on a
+	// single sample.
+	var recs []probe.Record
+	for i := 0; i < 30; i++ {
+		recs = append(recs,
+			rec(vnTime(1, 20), "A", "vn-viettel", "landmark-sgp", 80, 84, 88, 0.0),
+			rec(vnTime(1, 20), "B", "vn-viettel", "vps-x", 25, 27, 29, 0.0))
+	}
+	recs = append(recs, rec(vnTime(1, 20), "C", "vps-x", "landmark-sgp", 20, 22, 24, 0.0))
+
+	got := Evaluate(recs, DefaultThresholds(), 19, 23) // MinRuns 20
+	if len(got) != 1 {
+		t.Fatalf("got %d candidates, want 1", len(got))
+	}
+	if got[0].Pass {
+		t.Error("Pass = true with only one leg-C run; the floor must cover both legs")
+	}
+	if got[0].Runs != 1 {
+		t.Errorf("Runs = %d, want 1: the reported count must be the weaker leg", got[0].Runs)
 	}
 }

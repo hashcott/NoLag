@@ -27,7 +27,7 @@ type Thresholds struct {
 	MaxJitterMs    float64 // p95 - p50 on either tunnel leg
 	MaxLossPct     float64 // on either tunnel leg
 	MaxP99ExcessMs float64 // p99 - p50 on either tunnel leg
-	MinRuns        int     // fewest leg-B runs inside the window before a PASS is trustworthy
+	MinRuns        int     // fewest runs on the weaker tunnel leg inside the window before a PASS is trustworthy
 }
 
 // DefaultThresholds returns the values fixed in the design document.
@@ -40,7 +40,7 @@ type Candidate struct {
 	VPS           string
 	ISP           string
 	Landmark      string
-	Runs          int
+	Runs          int     // smaller of leg B's and leg C's run counts inside the window
 	HasBaseline   bool    // false when no leg-A record exists for this (ISP, landmark)
 	BaselineP50Ms float64 // median of leg A; meaningless when !HasBaseline
 	TunnelP50Ms   float64 // median of leg B plus median of leg C
@@ -131,6 +131,14 @@ func Evaluate(recs []probe.Record, th Thresholds, peakStartHourVN, peakEndHourVN
 				cand.Reasons = append(cand.Reasons, "no leg C records: the VPS never measured its own path to the landmark")
 				out = append(out, cand)
 				continue
+			}
+
+			// The floor covers both tunnel legs: a candidate with plenty of leg-B runs
+			// and one leg-C run is resting half its verdict on a single sample, and a
+			// dead leg-C cron is precisely the broken collection this floor is for.
+			cand.Runs = b.runs
+			if c != nil && c.runs < cand.Runs {
+				cand.Runs = c.runs
 			}
 
 			cand.TunnelP50Ms = median(b.p50) + median(c.p50)
