@@ -81,6 +81,33 @@ func TestRunRejectsUnresolvableTarget(t *testing.T) {
 	}
 }
 
+func TestRunStopsPromptlyWhenContextCancelled(t *testing.T) {
+	addr := startEchoServer(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	_, _, err := Run(ctx, ClientConfig{
+		Target:   addr,
+		Rate:     20,
+		Duration: 30 * time.Second,
+		Grace:    time.Second,
+	})
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("cancellation is not a failure: %v", err)
+	}
+	if elapsed > 3*time.Second {
+		t.Errorf("Run took %v after a cancel at 200ms; it must not wait out the "+
+			"full 31s window", elapsed)
+	}
+}
+
 func TestRunAppliesDefaults(t *testing.T) {
 	addr := startEchoServer(t)
 	// Duration is set small; Rate and Grace are left zero and must default.

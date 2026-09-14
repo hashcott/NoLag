@@ -33,8 +33,8 @@ func Serve(ctx context.Context, conn net.PacketConn) error {
 		if _, err := Unmarshal(buf[:n]); err != nil {
 			continue // not ours, drop it rather than reflect it
 		}
-		// Echo the first PacketSize bytes verbatim: the client matches on the
-		// sequence number and reads its own send time back out.
+		// Echo the first PacketSize bytes verbatim: the client reads its own send
+		// time back out of the echo to compute RTT.
 		if _, err := conn.WriteTo(buf[:PacketSize], addr); err != nil {
 			return err
 		}

@@ -66,6 +66,17 @@ func TestSummarizeDoesNotMutateInput(t *testing.T) {
 	}
 }
 
+func TestSummarizeMoreRepliesThanProbes(t *testing.T) {
+	// A duplicating path can echo more than was sent. Loss must floor at zero,
+	// never go negative — a negative loss reads as better than perfect.
+	rtts := []time.Duration{10 * time.Millisecond, 10 * time.Millisecond, 10 * time.Millisecond}
+	s := Summarize(2, rtts)
+	closeTo(t, "LossPct", s.LossPct, 0)
+	if s.Received != 3 {
+		t.Errorf("Received = %d, want 3: the raw count is still reported honestly", s.Received)
+	}
+}
+
 func TestSummarizeSentZero(t *testing.T) {
 	s := Summarize(0, nil)
 	closeTo(t, "LossPct", s.LossPct, 0)

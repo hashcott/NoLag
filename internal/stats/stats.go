@@ -31,7 +31,14 @@ func Summarize(sent int, rtts []time.Duration) Summary {
 	s := Summary{Sent: sent, Received: len(rtts)}
 
 	if sent > 0 {
-		s.LossPct = float64(sent-len(rtts)) / float64(sent) * 100
+		lost := sent - len(rtts)
+		if lost < 0 {
+			// More replies than probes means the path duplicated packets. Loss is not
+			// a negative quantity, and a negative percentage reads on a report as
+			// better than perfect.
+			lost = 0
+		}
+		s.LossPct = float64(lost) / float64(sent) * 100
 	}
 	if len(rtts) == 0 {
 		return s
