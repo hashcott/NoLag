@@ -13,11 +13,15 @@ ALLOW=""
 PORT="51830"
 BIN="/usr/local/bin/gnl-probe"
 
+need() { # need <flag> <value>
+  [[ -n "${2:-}" ]] || { echo "$1 requires a value" >&2; exit 2; }
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --mode)  MODE="$2";  shift 2 ;;
-    --allow) ALLOW="$2"; shift 2 ;;
-    --port)  PORT="$2";  shift 2 ;;
+    --mode)  need --mode  "${2:-}"; MODE="$2";  shift 2 ;;
+    --allow) need --allow "${2:-}"; ALLOW="$2"; shift 2 ;;
+    --port)  need --port  "${2:-}"; PORT="$2";  shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -29,6 +33,33 @@ fi
 if [[ "$MODE" != "server" && "$MODE" != "client" ]]; then
   echo "--mode must be server or client" >&2
   exit 2
+fi
+if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1024 || PORT > 65535 )); then
+  # DynamicUser=yes means no CAP_NET_BIND_SERVICE, so a privileged port cannot be
+  # bound at all. Refusing here beats a service that fails to start later for a
+  # reason this script never mentions.
+  echo "--port must be between 1024 and 65535 (got: $PORT)" >&2
+  exit 2
+fi
+
+# Everything server mode needs, checked before a single byte is written. The
+# binary install below is a mutation, and a script that modifies the machine and
+# then refuses is not the "safe to re-run" this file claims to be at the top.
+if [[ "$MODE" == "server" ]]; then
+  if [[ -z "$ALLOW" ]]; then
+    echo "--allow is required in server mode: a comma-separated list of the public" >&2
+    echo "IP addresses permitted to probe this host." >&2
+    exit 2
+  fi
+  if ! command -v iptables >/dev/null 2>&1; then
+    echo "iptables not found; install it first" >&2
+    exit 1
+  fi
+  if ! command -v systemctl >/dev/null 2>&1; then
+    echo "systemctl not found. This script installs a systemd unit and cannot" >&2
+    echo "configure a host without systemd." >&2
+    exit 1
+  fi
 fi
 if [[ ! -x "./gnl-probe" ]]; then
   echo "Build the binary first, then run this from the directory holding it:" >&2
@@ -52,35 +83,37 @@ fi
 # at that victim. The magic-prefix check in the server drops unrelated payloads
 # but cannot see a forged source address. So the port is closed by default and
 # opened only to the measurement hosts.
-if [[ -z "$ALLOW" ]]; then
-  echo "--allow is required in server mode: a comma-separated list of the public" >&2
-  echo "IP addresses permitted to probe this host." >&2
-  exit 2
-fi
-
-if ! command -v iptables >/dev/null 2>&1; then
-  echo "iptables not found; install it first" >&2
-  exit 1
-fi
 
 # Rebuild a dedicated chain from scratch so re-running never stacks duplicates.
 iptables -N GNL_PROBE 2>/dev/null || iptables -F GNL_PROBE
+# Re-running with a different --port leaves the previous port's INPUT jump rule
+# behind: changing port across runs is not a documented workflow.
 iptables -C INPUT -p udp --dport "$PORT" -j GNL_PROBE 2>/dev/null \
   || iptables -I INPUT 1 -p udp --dport "$PORT" -j GNL_PROBE
 
+added=0
 IFS=',' read -ra SRCS <<< "$ALLOW"
 for src in "${SRCS[@]}"; do
   src="$(echo "$src" | tr -d '[:space:]')"
   [[ -z "$src" ]] && continue
   iptables -A GNL_PROBE -s "$src" -j ACCEPT
   echo "==> allowed $src"
+  added=$((added + 1))
 done
+if [[ $added -eq 0 ]]; then
+  # A value like "," is non-empty but contains no address. Without this the chain
+  # would end up DROP-only and the host would silently refuse every probe for the
+  # whole campaign.
+  echo "--allow contained no usable address: $ALLOW" >&2
+  exit 2
+fi
 iptables -A GNL_PROBE -j DROP
 echo "==> everything else to UDP $PORT is dropped"
 
 cat > /etc/systemd/system/gnl-probe.service <<UNIT
 [Unit]
 Description=GameNoLag P0 measurement echo server
+Wants=network-online.target
 After=network-online.target
 
 [Service]

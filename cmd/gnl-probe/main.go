@@ -32,6 +32,7 @@ func main() {
 	case "client":
 		os.Exit(runClient(os.Args[2:]))
 	default:
+		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n", os.Args[1])
 		usage()
 		os.Exit(2)
 	}
