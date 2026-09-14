@@ -12,6 +12,7 @@ MODE=""
 ALLOW=""
 PORT="51830"
 BIN="/usr/local/bin/gnl-probe"
+SRCS=()   # --allow, parsed and validated up front; used by the chain build
 
 need() { # need <flag> <value>
   [[ -n "${2:-}" ]] || { echo "$1 requires a value" >&2; exit 2; }
@@ -26,10 +27,6 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ $EUID -ne 0 ]]; then
-  echo "Must run as root: sudo $0 ..." >&2
-  exit 1
-fi
 if [[ "$MODE" != "server" && "$MODE" != "client" ]]; then
   echo "--mode must be server or client" >&2
   exit 2
@@ -51,6 +48,19 @@ if [[ "$MODE" == "server" ]]; then
     echo "IP addresses permitted to probe this host." >&2
     exit 2
   fi
+  IFS=',' read -ra RAW <<< "$ALLOW"
+  for s in "${RAW[@]}"; do
+    s="$(echo "$s" | tr -d '[:space:]')"
+    [[ -n "$s" ]] && SRCS+=("$s")
+  done
+  if [[ ${#SRCS[@]} -eq 0 ]]; then
+    # A value like "," is non-empty but names no address. Caught here rather than
+    # after the ACCEPT loop, because by then the binary is installed and the chain
+    # is built - and a DROP-only chain silently refuses every probe for the whole
+    # campaign.
+    echo "--allow contained no usable address: $ALLOW" >&2
+    exit 2
+  fi
   if ! command -v iptables >/dev/null 2>&1; then
     echo "iptables not found; install it first" >&2
     exit 1
@@ -64,6 +74,14 @@ fi
 if [[ ! -x "./gnl-probe" ]]; then
   echo "Build the binary first, then run this from the directory holding it:" >&2
   echo "  GOOS=linux GOARCH=amd64 go build -o gnl-probe ./cmd/gnl-probe" >&2
+  exit 1
+fi
+
+# Root is needed from here down, where the machine actually gets modified.
+# Everything above is argument checking, which needs no privilege - so a typo
+# reports itself instead of being masked by "must run as root".
+if [[ $EUID -ne 0 ]]; then
+  echo "Must run as root: sudo $0 ..." >&2
   exit 1
 fi
 
@@ -91,22 +109,12 @@ iptables -N GNL_PROBE 2>/dev/null || iptables -F GNL_PROBE
 iptables -C INPUT -p udp --dport "$PORT" -j GNL_PROBE 2>/dev/null \
   || iptables -I INPUT 1 -p udp --dport "$PORT" -j GNL_PROBE
 
-added=0
-IFS=',' read -ra SRCS <<< "$ALLOW"
+# SRCS was parsed and validated in the upfront server-mode block: non-empty is
+# guaranteed here.
 for src in "${SRCS[@]}"; do
-  src="$(echo "$src" | tr -d '[:space:]')"
-  [[ -z "$src" ]] && continue
   iptables -A GNL_PROBE -s "$src" -j ACCEPT
   echo "==> allowed $src"
-  added=$((added + 1))
 done
-if [[ $added -eq 0 ]]; then
-  # A value like "," is non-empty but contains no address. Without this the chain
-  # would end up DROP-only and the host would silently refuse every probe for the
-  # whole campaign.
-  echo "--allow contained no usable address: $ALLOW" >&2
-  exit 2
-fi
 iptables -A GNL_PROBE -j DROP
 echo "==> everything else to UDP $PORT is dropped"
 
