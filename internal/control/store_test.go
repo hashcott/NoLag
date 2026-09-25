@@ -28,7 +28,8 @@ func openTestStore(t *testing.T) *Store {
 	t.Cleanup(func() { s.Close() })
 
 	if _, err := s.pool.Exec(ctx,
-		`DROP TABLE IF EXISTS peer_binding, device, relay, contributor_key, game_profile CASCADE;
+		`DROP TABLE IF EXISTS peer_binding, device, relay, contributor_key, game_profile,
+		                      observed_address CASCADE;
 		 DROP SEQUENCE IF EXISTS relay_octet_seq`); err != nil {
 		t.Fatalf("drop: %v", err)
 	}
