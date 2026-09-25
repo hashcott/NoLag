@@ -379,3 +379,240 @@ func (s *Store) DesiredState(ctx context.Context, relayID string) ([]api.Peer, [
 	}
 	return peers, cidrs, nil
 }
+
+// ErrSlotsFull is returned when a contributor key already has its maximum
+// number of devices activated.
+var ErrSlotsFull = errors.New("control: no device slots left on this key")
+
+// ActivateDevice registers a device against a contributor key and binds it an
+// inner address on every relay that key may use.
+//
+// Idempotent on the device public key: re-running the client, or reinstalling
+// it without wiping its key, must not consume a second slot. That matters more
+// than it sounds - a slot that leaks on every reinstall turns a three-device
+// allowance into a support burden within a week.
+func (s *Store) ActivateDevice(ctx context.Context, contributorKey, devicePubKey, fingerprint string) (string, []api.DeviceSummary, error) {
+	keyHash := Hash(contributorKey)
+
+	var status string
+	var maxDevices int
+	err := s.pool.QueryRow(ctx,
+		`SELECT status, max_devices FROM contributor_key WHERE key_hash = $1`, keyHash).
+		Scan(&status, &maxDevices)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && status != "active") {
+		return "", nil, ErrUnknownKey
+	}
+	if err != nil {
+		return "", nil, fmt.Errorf("control: look up key: %w", err)
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", nil, fmt.Errorf("control: begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var deviceID string
+	err = tx.QueryRow(ctx,
+		`SELECT id FROM device WHERE wg_pubkey = $1 AND key_hash = $2`,
+		devicePubKey, keyHash).Scan(&deviceID)
+
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		var used int
+		if err := tx.QueryRow(ctx,
+			`SELECT COUNT(*) FROM device WHERE key_hash = $1`, keyHash).Scan(&used); err != nil {
+			return "", nil, fmt.Errorf("control: count devices: %w", err)
+		}
+		if used >= maxDevices {
+			held, err := s.devicesForKey(ctx, keyHash)
+			if err != nil {
+				return "", nil, err
+			}
+			return "", held, ErrSlotsFull
+		}
+		deviceID = fmt.Sprintf("dev-%s", Hash(devicePubKey)[:12])
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO device (id, key_hash, wg_pubkey, fingerprint) VALUES ($1,$2,$3,$4)`,
+			deviceID, keyHash, devicePubKey, fingerprint); err != nil {
+			return "", nil, fmt.Errorf("control: insert device: %w", err)
+		}
+	case err != nil:
+		return "", nil, fmt.Errorf("control: look up device: %w", err)
+	default:
+		// Already activated. Refresh what a human reads and consume nothing.
+		if _, err := tx.Exec(ctx,
+			`UPDATE device SET fingerprint = $2, last_seen = now() WHERE id = $1`,
+			deviceID, fingerprint); err != nil {
+			return "", nil, fmt.Errorf("control: refresh device: %w", err)
+		}
+	}
+
+	if err := s.bindDeviceToRelays(ctx, tx, deviceID, keyHash); err != nil {
+		return "", nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", nil, fmt.Errorf("control: commit: %w", err)
+	}
+	return deviceID, nil, nil
+}
+
+func (s *Store) devicesForKey(ctx context.Context, keyHash string) ([]api.DeviceSummary, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, fingerprint, COALESCE(last_seen::text, '')
+		   FROM device WHERE key_hash = $1 ORDER BY created_at`, keyHash)
+	if err != nil {
+		return nil, fmt.Errorf("control: list devices: %w", err)
+	}
+	defer rows.Close()
+	var out []api.DeviceSummary
+	for rows.Next() {
+		var d api.DeviceSummary
+		if err := rows.Scan(&d.ID, &d.Fingerprint, &d.LastSeen); err != nil {
+			return nil, fmt.Errorf("control: scan device: %w", err)
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// bindDeviceToRelays gives the device an inner address on every relay it may
+// use, reusing the one it already holds.
+//
+// Stable addresses are the point: a client that loses its network for a few
+// seconds must not have to re-address its adapter and reinstall every route at
+// exactly the moment the network is least reliable.
+func (s *Store) bindDeviceToRelays(ctx context.Context, tx pgx.Tx, deviceID, keyHash string) error {
+	rows, err := tx.Query(ctx, `SELECT id, inner_subnet FROM relay`)
+	if err != nil {
+		return fmt.Errorf("control: list relays: %w", err)
+	}
+	type rel struct{ id, subnet string }
+	var relays []rel
+	for rows.Next() {
+		var r rel
+		if err := rows.Scan(&r.id, &r.subnet); err != nil {
+			rows.Close()
+			return fmt.Errorf("control: scan relay: %w", err)
+		}
+		relays = append(relays, r)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("control: list relays: %w", err)
+	}
+
+	for _, r := range relays {
+		var octet int
+		if _, err := fmt.Sscanf(r.subnet, "10.%d.", &octet); err != nil {
+			continue // a malformed subnet is that relay's problem, not this device's
+		}
+		// Next free host address in this relay's /16, skipping .0.1 which the relay
+		// itself holds. UNIQUE(relay_id, inner_ip) in the schema is what actually
+		// guarantees two devices never share one - not this query.
+		prefix := fmt.Sprintf("10.%d.", octet)
+		var ip string
+		err := tx.QueryRow(ctx,
+			`SELECT cand FROM (
+			   SELECT $2 || (n / 254) || '.' || (n % 254 + 1) || '/32' AS cand
+			     FROM generate_series(1, 65000) AS n
+			 ) c
+			 WHERE cand NOT IN (SELECT inner_ip FROM peer_binding WHERE relay_id = $1)
+			 LIMIT 1`, r.id, prefix).Scan(&ip)
+		if err != nil {
+			return fmt.Errorf("control: allocate inner ip on %s: %w", r.id, err)
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO peer_binding (device_id, relay_id, inner_ip)
+			 VALUES ($1,$2,$3) ON CONFLICT (device_id, relay_id) DO NOTHING`,
+			deviceID, r.id, ip); err != nil {
+			return fmt.Errorf("control: bind device to %s: %w", r.id, err)
+		}
+	}
+	return nil
+}
+
+// Session returns the relays a device may use, already filtered.
+//
+// Filtered, not ranked. The control plane cannot know what any individual
+// player's path looks like, so it removes what is unusable and lets the client
+// measure the rest.
+func (s *Store) Session(ctx context.Context, contributorKey, devicePubKey string, mtu int) (api.SessionResponse, error) {
+	keyHash := Hash(contributorKey)
+
+	var deviceID string
+	err := s.pool.QueryRow(ctx,
+		`SELECT id FROM device WHERE wg_pubkey = $1 AND key_hash = $2`,
+		devicePubKey, keyHash).Scan(&deviceID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return api.SessionResponse{}, ErrUnknownKey
+	}
+	if err != nil {
+		return api.SessionResponse{}, fmt.Errorf("control: look up device: %w", err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE device SET last_seen = now() WHERE id = $1`, deviceID); err != nil {
+		return api.SessionResponse{}, fmt.Errorf("control: touch device: %w", err)
+	}
+
+	rows, err := s.pool.Query(ctx,
+		`SELECT r.id, r.endpoint, r.wg_pubkey, b.inner_ip, r.region
+		   FROM relay r
+		   JOIN peer_binding b ON b.relay_id = r.id AND b.device_id = $1
+		  WHERE r.status = 'up'
+		    AND r.trusted_after <= now()
+		  ORDER BY r.region, r.id`, deviceID)
+	if err != nil {
+		return api.SessionResponse{}, fmt.Errorf("control: list relays: %w", err)
+	}
+	defer rows.Close()
+
+	out := api.SessionResponse{}
+	for rows.Next() {
+		o := api.RelayOffer{MTU: mtu}
+		if err := rows.Scan(&o.RelayID, &o.Endpoint, &o.PublicKey, &o.InnerIP, &o.Region); err != nil {
+			return api.SessionResponse{}, fmt.Errorf("control: scan relay: %w", err)
+		}
+		out.Relays = append(out.Relays, o)
+	}
+	if err := rows.Err(); err != nil {
+		return api.SessionResponse{}, fmt.Errorf("control: list relays: %w", err)
+	}
+
+	var version int
+	err = s.pool.QueryRow(ctx, `SELECT version FROM game_profile ORDER BY version DESC LIMIT 1`).Scan(&version)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return api.SessionResponse{}, fmt.Errorf("control: read profile version: %w", err)
+	}
+	out.ProfileVersion = version
+	return out, nil
+}
+
+// Profile returns the current game address list.
+func (s *Store) Profile(ctx context.Context) (api.ProfileResponse, error) {
+	var out api.ProfileResponse
+	err := s.pool.QueryRow(ctx,
+		`SELECT version, cidrs FROM game_profile ORDER BY version DESC LIMIT 1`).
+		Scan(&out.Version, &out.CIDRs)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// No profile yet is a real state, not an error: a client that routes
+		// nothing is correct before the first profile exists.
+		return api.ProfileResponse{}, nil
+	}
+	if err != nil {
+		return api.ProfileResponse{}, fmt.Errorf("control: read profile: %w", err)
+	}
+	return out, nil
+}
+
+// ReleaseDevice frees a slot.
+func (s *Store) ReleaseDevice(ctx context.Context, contributorKey, deviceID string) error {
+	tag, err := s.pool.Exec(ctx,
+		`DELETE FROM device WHERE id = $1 AND key_hash = $2`, deviceID, Hash(contributorKey))
+	if err != nil {
+		return fmt.Errorf("control: release device: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrUnknownKey
+	}
+	return nil
+}

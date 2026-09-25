@@ -27,7 +27,26 @@ type fakeBackend struct {
 	reachOK     bool
 	reachDetail string
 	reachErr    error
+
+	actID      string
+	actHeld    []api.DeviceSummary
+	actErr     error
+	sess       api.SessionResponse
+	sessErr    error
+	prof       api.ProfileResponse
+	releaseErr error
 }
+
+func (f *fakeBackend) ActivateDevice(_ context.Context, _, _, _ string) (string, []api.DeviceSummary, error) {
+	return f.actID, f.actHeld, f.actErr
+}
+func (f *fakeBackend) Session(_ context.Context, _, _ string, _ int) (api.SessionResponse, error) {
+	return f.sess, f.sessErr
+}
+func (f *fakeBackend) Profile(_ context.Context) (api.ProfileResponse, error) {
+	return f.prof, nil
+}
+func (f *fakeBackend) ReleaseDevice(_ context.Context, _, _ string) error { return f.releaseErr }
 
 func (f *fakeBackend) RegisterRelay(context.Context, RegisterInput) (RegisterOutput, error) {
 	return f.registerOut, f.registerErr
@@ -328,5 +347,89 @@ func TestForwardedForIsIgnoredUnlessTrusted(t *testing.T) {
 	if code != http.StatusTooManyRequests {
 		t.Error("spoofed X-Forwarded-For values each got their own bucket; the limit " +
 			"can be bypassed by anyone who sets a header")
+	}
+}
+
+// Being told "no slots left" without being told which machines hold them leaves
+// somebody guessing at their own hardware.
+func TestActivateSlotsFullNamesTheDevices(t *testing.T) {
+	b := &fakeBackend{actErr: ErrSlotsFull, actHeld: []api.DeviceSummary{
+		{ID: "dev-1", Fingerprint: "harry-desktop"},
+		{ID: "dev-2", Fingerprint: "harry-laptop"},
+	}}
+	rec := post(t, NewServer(b, 10, false), "/v1/activate", "", api.ActivateRequest{
+		ContributorKey: "GNL-AAAA-BBBB-CCCC-DDDD", DevicePublicKey: "dpk",
+	})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", rec.Code)
+	}
+	var out api.SlotsFullResponse
+	json.Unmarshal(rec.Body.Bytes(), &out)
+	if len(out.Devices) != 2 {
+		t.Fatalf("409 listed %d devices, want 2", len(out.Devices))
+	}
+	if out.Devices[0].Fingerprint == "" {
+		t.Error("the devices are listed without fingerprints; the person cannot tell which machine to release")
+	}
+}
+
+func TestSessionRequiresBothCredentials(t *testing.T) {
+	h := NewServer(&fakeBackend{}, 10, false)
+	for _, hdr := range []map[string]string{
+		{},
+		{"Authorization": "Bearer GNL-A"},
+		{"X-Device-Key": "dpk"},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/v1/session", nil)
+		for k, v := range hdr {
+			req.Header.Set(k, v)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("status = %d with headers %v, want 401", rec.Code, hdr)
+		}
+	}
+}
+
+// The profile is a list of public game server ranges. Guarding it would protect
+// nothing and would stop a client fetching routes before activation.
+func TestProfileNeedsNoCredentials(t *testing.T) {
+	b := &fakeBackend{prof: api.ProfileResponse{Version: 3, CIDRs: []string{"20.24.48.0/20"}}}
+	req := httptest.NewRequest(http.MethodGet, "/v1/profile", nil)
+	rec := httptest.NewRecorder()
+	NewServer(b, 10, false).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var out api.ProfileResponse
+	json.Unmarshal(rec.Body.Bytes(), &out)
+	if out.Version != 3 || len(out.CIDRs) != 1 {
+		t.Errorf("profile = %+v", out)
+	}
+}
+
+// Releasing must answer the same whether the device does not exist or belongs to
+// someone else, or it becomes a way to enumerate device ids.
+func TestReleaseDeviceIsNotAnEnumerationOracle(t *testing.T) {
+	h := NewServer(&fakeBackend{releaseErr: ErrUnknownKey}, 10, false)
+	for _, id := range []string{"dev-real", "dev-does-not-exist"} {
+		req := httptest.NewRequest(http.MethodDelete, "/v1/devices/"+id, nil)
+		req.Header.Set("Authorization", "Bearer GNL-AAAA-BBBB-CCCC-DDDD")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("status = %d for %q, want 403 for both", rec.Code, id)
+		}
+	}
+}
+
+func TestReleaseRejectsAPathWithNoID(t *testing.T) {
+	req := httptest.NewRequest(http.MethodDelete, "/v1/devices/", nil)
+	req.Header.Set("Authorization", "Bearer GNL-A")
+	rec := httptest.NewRecorder()
+	NewServer(&fakeBackend{}, 10, false).ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rec.Code)
 	}
 }

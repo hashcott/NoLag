@@ -11,6 +11,11 @@ CREATE TABLE IF NOT EXISTS contributor_key (
     grandfathered BOOLEAN     NOT NULL DEFAULT true
 );
 
+-- How many devices one contributor key may activate at once. Spec 8: a key is a
+-- credential people can share, and device slots are what makes sharing it
+-- pointless rather than forbidden.
+ALTER TABLE contributor_key ADD COLUMN IF NOT EXISTS max_devices INT NOT NULL DEFAULT 3;
+
 CREATE TABLE IF NOT EXISTS relay (
     id            TEXT        PRIMARY KEY,
     key_hash      TEXT        NOT NULL REFERENCES contributor_key(key_hash),
@@ -39,6 +44,9 @@ CREATE TABLE IF NOT EXISTS device (
     key_hash   TEXT        NOT NULL REFERENCES contributor_key(key_hash),
     wg_pubkey  TEXT        NOT NULL UNIQUE,
     name       TEXT        NOT NULL DEFAULT '',
+    -- Shown back when a key runs out of slots, so the person can tell which of
+    -- their own machines to release rather than guessing at opaque ids.
+    fingerprint TEXT       NOT NULL DEFAULT '',
     last_seen  TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

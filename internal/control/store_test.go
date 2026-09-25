@@ -449,3 +449,151 @@ func TestOneKeyCannotDrainTheSubnetPool(t *testing.T) {
 		t.Errorf("an unrelated contributor was blocked by somebody else's cap: %v", err)
 	}
 }
+
+func TestActivateBindsADeviceToEveryRelay(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	key, _ := s.CreateContributorKey(ctx)
+	for i := 0; i < 2; i++ {
+		if _, err := s.RegisterRelay(ctx, RegisterInput{
+			ContributorKey: key, PublicKey: fmt.Sprintf("relay-%d", i),
+			Endpoint: fmt.Sprintf("203.0.113.%d:51820", i+1),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	id, _, err := s.ActivateDevice(ctx, key, "device-pk", "harry-desktop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM peer_binding WHERE device_id = $1`, id).Scan(&n)
+	if n != 2 {
+		t.Errorf("device bound to %d relays, want 2", n)
+	}
+	// Two relays, two different pools, so two different addresses.
+	var distinct int
+	s.pool.QueryRow(ctx, `SELECT COUNT(DISTINCT inner_ip) FROM peer_binding WHERE device_id = $1`, id).Scan(&distinct)
+	if distinct != 2 {
+		t.Errorf("device holds %d distinct addresses across 2 relays", distinct)
+	}
+}
+
+// A slot that leaks on every reinstall turns a three-device allowance into a
+// support burden within a week.
+func TestActivateIsIdempotentOnTheDeviceKey(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	key, _ := s.CreateContributorKey(ctx)
+	s.RegisterRelay(ctx, RegisterInput{ContributorKey: key, PublicKey: "r1", Endpoint: "203.0.113.1:51820"})
+
+	first, _, err := s.ActivateDevice(ctx, key, "same-device", "laptop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 4; i++ {
+		again, _, err := s.ActivateDevice(ctx, key, "same-device", "laptop")
+		if err != nil {
+			t.Fatalf("re-activation %d: %v", i, err)
+		}
+		if again != first {
+			t.Fatalf("device id changed on re-activation: %s then %s", first, again)
+		}
+	}
+	var used int
+	s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM device`).Scan(&used)
+	if used != 1 {
+		t.Errorf("%d devices after five activations of one key, want 1", used)
+	}
+}
+
+// Running out of slots must name the machines holding them. "You are out of
+// slots" alone leaves somebody guessing at their own hardware.
+func TestSlotsFullNamesTheDevicesHoldingThem(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	key, _ := s.CreateContributorKey(ctx)
+
+	var maxDevices int
+	s.pool.QueryRow(ctx, `SELECT max_devices FROM contributor_key WHERE key_hash = $1`, Hash(key)).Scan(&maxDevices)
+	for i := 0; i < maxDevices; i++ {
+		if _, _, err := s.ActivateDevice(ctx, key, fmt.Sprintf("dev-pk-%d", i), fmt.Sprintf("machine-%d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, held, err := s.ActivateDevice(ctx, key, "one-too-many", "new-laptop")
+	if !errors.Is(err, ErrSlotsFull) {
+		t.Fatalf("err = %v, want ErrSlotsFull", err)
+	}
+	if len(held) != maxDevices {
+		t.Fatalf("reported %d devices holding slots, want %d", len(held), maxDevices)
+	}
+	for _, d := range held {
+		if d.Fingerprint == "" {
+			t.Error("a device is reported with no fingerprint; the person cannot tell which machine it is")
+		}
+	}
+}
+
+// Session filters rather than ranks: it must exclude relays that are not up and
+// relays still inside their observation window.
+func TestSessionOffersOnlyUsableRelays(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	key, _ := s.CreateContributorKey(ctx)
+
+	good, _ := s.RegisterRelay(ctx, RegisterInput{ContributorKey: key, PublicKey: "r-good", Endpoint: "203.0.113.1:51820", Region: "sgp"})
+	pending, _ := s.RegisterRelay(ctx, RegisterInput{ContributorKey: key, PublicKey: "r-pending", Endpoint: "203.0.113.2:51820"})
+	young, _ := s.RegisterRelay(ctx, RegisterInput{ContributorKey: key, PublicKey: "r-young", Endpoint: "203.0.113.3:51820"})
+
+	// good: reachable and past its window. young: reachable but still inside it.
+	s.RecordReachability(ctx, key, "r-good", true, "")
+	s.RecordReachability(ctx, key, "r-young", true, "")
+	s.pool.Exec(ctx, `UPDATE relay SET trusted_after = now() - interval '1 day' WHERE id = $1`, good.RelayID)
+	s.pool.Exec(ctx, `UPDATE relay SET trusted_after = now() + interval '1 day' WHERE id = $1`, young.RelayID)
+	_ = pending // left at status 'pending': never verified from outside
+
+	if _, _, err := s.ActivateDevice(ctx, key, "dev-pk", "pc"); err != nil {
+		t.Fatal(err)
+	}
+	sess, err := s.Session(ctx, key, "dev-pk", 1420)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sess.Relays) != 1 {
+		var got []string
+		for _, r := range sess.Relays {
+			got = append(got, r.RelayID)
+		}
+		t.Fatalf("offered %v, want only the verified relay past its window", got)
+	}
+	if sess.Relays[0].RelayID != good.RelayID {
+		t.Errorf("offered %s, want %s", sess.Relays[0].RelayID, good.RelayID)
+	}
+	if sess.Relays[0].InnerIP == "" || sess.Relays[0].PublicKey == "" || sess.Relays[0].MTU != 1420 {
+		t.Errorf("offer is incomplete: %+v", sess.Relays[0])
+	}
+}
+
+func TestReleaseDeviceFreesASlot(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	key, _ := s.CreateContributorKey(ctx)
+	id, _, err := s.ActivateDevice(ctx, key, "dev-pk", "pc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, _ := s.CreateContributorKey(ctx)
+	if err := s.ReleaseDevice(ctx, other, id); !errors.Is(err, ErrUnknownKey) {
+		t.Errorf("a stranger released somebody else's device: %v", err)
+	}
+	if err := s.ReleaseDevice(ctx, key, id); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM device`).Scan(&n)
+	if n != 0 {
+		t.Errorf("%d devices left after release, want 0", n)
+	}
+}

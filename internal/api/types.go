@@ -96,6 +96,60 @@ type ReachabilityReport struct {
 	Detail         string `json:"detail,omitempty"`
 }
 
+// ActivateRequest is sent once per device, when someone pastes their key.
+type ActivateRequest struct {
+	ContributorKey  string `json:"contributor_key"`
+	DevicePublicKey string `json:"device_public_key"`
+	Fingerprint     string `json:"fingerprint"`
+}
+
+// DeviceSummary identifies one device already holding a slot.
+type DeviceSummary struct {
+	ID          string `json:"id"`
+	Fingerprint string `json:"fingerprint"`
+	LastSeen    string `json:"last_seen,omitempty"`
+}
+
+// ActivateResponse carries the device's identity back.
+type ActivateResponse struct {
+	DeviceID string `json:"device_id"`
+}
+
+// SlotsFullResponse is the 409 body. It names the devices currently holding the
+// slots, because "you are out of slots" without saying which machines hold them
+// leaves somebody guessing at their own hardware.
+type SlotsFullResponse struct {
+	Error   string          `json:"error"`
+	Hint    string          `json:"hint,omitempty"`
+	Devices []DeviceSummary `json:"devices"`
+}
+
+// RelayOffer is one relay a client may connect to.
+type RelayOffer struct {
+	RelayID   string `json:"relay_id"`
+	Endpoint  string `json:"endpoint"`
+	PublicKey string `json:"public_key"`
+	InnerIP   string `json:"inner_ip"`
+	Region    string `json:"region"`
+	MTU       int    `json:"mtu"`
+}
+
+// SessionResponse is what a client needs in order to connect.
+//
+// The client measures these itself and picks the fastest: the control plane has
+// no idea what any given player's path looks like, so it filters rather than
+// ranks.
+type SessionResponse struct {
+	Relays         []RelayOffer `json:"relays"`
+	ProfileVersion int          `json:"profile_version"`
+}
+
+// ProfileResponse is the game address list the client routes into the tunnel.
+type ProfileResponse struct {
+	Version int      `json:"version"`
+	CIDRs   []string `json:"cidrs"`
+}
+
 // ErrorResponse is the body of every non-2xx reply.
 type ErrorResponse struct {
 	Error string `json:"error"`

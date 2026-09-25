@@ -23,6 +23,10 @@ type Backend interface {
 	AuthenticateRelay(ctx context.Context, token string) (string, error)
 	RecordStatus(ctx context.Context, relayID string, st api.RelayStatus) error
 	RecordReachability(ctx context.Context, contributorKey, relayPubKey string, ok bool, detail string) error
+	ActivateDevice(ctx context.Context, contributorKey, devicePubKey, fingerprint string) (string, []api.DeviceSummary, error)
+	Session(ctx context.Context, contributorKey, devicePubKey string, mtu int) (api.SessionResponse, error)
+	Profile(ctx context.Context) (api.ProfileResponse, error)
+	ReleaseDevice(ctx context.Context, contributorKey, deviceID string) error
 	DesiredState(ctx context.Context, relayID string) ([]api.Peer, []string, error)
 }
 
@@ -39,6 +43,9 @@ type server struct {
 
 	// Set only when something in front of this really does set X-Forwarded-For.
 	trustProxy bool
+
+	// MTU handed to clients for their tunnel adapter.
+	clientMTU int
 }
 
 // NewServer returns the control plane's HTTP handler.
@@ -53,11 +60,16 @@ func NewServer(b Backend, pollSecs int, trustProxy bool) http.Handler {
 		byKey: NewLimiter(20, time.Hour),
 
 		trustProxy: trustProxy,
+		clientMTU:  1420,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/relay/register", s.handleRegister)
 	mux.HandleFunc("/v1/relay/sync", s.handleSync)
 	mux.HandleFunc("/v1/relay/reachability", s.handleReachability)
+	mux.HandleFunc("/v1/activate", s.handleActivate)
+	mux.HandleFunc("/v1/session", s.handleSession)
+	mux.HandleFunc("/v1/profile", s.handleProfile)
+	mux.HandleFunc("/v1/devices/", s.handleDevices)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok\n"))
@@ -97,6 +109,134 @@ func (s *server) handleReachability(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Printf("reachability: %v", err)
 		writeErr(w, http.StatusInternalServerError, "could not record the result", "")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// clientAuth pulls the credentials a client sends on every call.
+//
+// The contributor key travels in a header rather than a query string, because a
+// query string lands in access logs and browser history. The device public key
+// identifies which of that key's devices is calling.
+func clientAuth(r *http.Request) (key, devicePubKey string) {
+	return strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "),
+		r.Header.Get("X-Device-Key")
+}
+
+func (s *server) handleActivate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "use POST", "")
+		return
+	}
+	var req api.ActivateRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "malformed JSON body", "")
+		return
+	}
+	if req.ContributorKey == "" || req.DevicePublicKey == "" {
+		writeErr(w, http.StatusBadRequest, "contributor_key and device_public_key are required", "")
+		return
+	}
+	if len(req.Fingerprint) > 100 {
+		req.Fingerprint = req.Fingerprint[:100]
+	}
+	// Activation consumes a device slot and is key-bearing, so it is limited like
+	// the other endpoints that take a contributor key.
+	if !s.limit(w, r, req.ContributorKey) {
+		return
+	}
+
+	id, held, err := s.b.ActivateDevice(r.Context(), req.ContributorKey, req.DevicePublicKey, req.Fingerprint)
+	switch {
+	case errors.Is(err, ErrSlotsFull):
+		// Name the machines holding the slots. Telling somebody they are out of
+		// slots without saying which of their own devices hold them leaves them
+		// guessing at their own hardware.
+		writeJSON(w, http.StatusConflict, api.SlotsFullResponse{
+			Error:   "this key has no device slots left",
+			Hint:    "release one of these devices, then activate again",
+			Devices: held,
+		})
+		return
+	case errors.Is(err, ErrUnknownKey):
+		writeErr(w, http.StatusForbidden, "that contributor key is not valid",
+			"check for typos; keys use no I, L, O or U")
+		return
+	case err != nil:
+		log.Printf("activate: %v", err)
+		writeErr(w, http.StatusInternalServerError, "activation failed", "")
+		return
+	}
+	writeJSON(w, http.StatusOK, api.ActivateResponse{DeviceID: id})
+}
+
+func (s *server) handleSession(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeErr(w, http.StatusMethodNotAllowed, "use GET", "")
+		return
+	}
+	key, devKey := clientAuth(r)
+	if key == "" || devKey == "" {
+		writeErr(w, http.StatusUnauthorized, "missing credentials",
+			"send the contributor key as a bearer token and the device public key in X-Device-Key")
+		return
+	}
+	sess, err := s.b.Session(r.Context(), key, devKey, s.clientMTU)
+	if errors.Is(err, ErrUnknownKey) {
+		writeErr(w, http.StatusForbidden, "this device is not activated on that key",
+			"run activation again")
+		return
+	}
+	if err != nil {
+		log.Printf("session: %v", err)
+		writeErr(w, http.StatusInternalServerError, "could not build a session", "")
+		return
+	}
+	writeJSON(w, http.StatusOK, sess)
+}
+
+func (s *server) handleProfile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeErr(w, http.StatusMethodNotAllowed, "use GET", "")
+		return
+	}
+	// Deliberately unauthenticated: the profile is a list of public game server
+	// address ranges, published by the game vendors themselves. Guarding it would
+	// protect nothing and would stop a client fetching routes before activation.
+	prof, err := s.b.Profile(r.Context())
+	if err != nil {
+		log.Printf("profile: %v", err)
+		writeErr(w, http.StatusInternalServerError, "could not read the profile", "")
+		return
+	}
+	writeJSON(w, http.StatusOK, prof)
+}
+
+func (s *server) handleDevices(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		writeErr(w, http.StatusMethodNotAllowed, "use DELETE", "")
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/v1/devices/")
+	if id == "" || strings.Contains(id, "/") {
+		writeErr(w, http.StatusBadRequest, "path must be /v1/devices/<device-id>", "")
+		return
+	}
+	key, _ := clientAuth(r)
+	if key == "" {
+		writeErr(w, http.StatusUnauthorized, "missing credentials",
+			"send the contributor key as a bearer token")
+		return
+	}
+	if err := s.b.ReleaseDevice(r.Context(), key, id); errors.Is(err, ErrUnknownKey) {
+		// Same answer whether the device does not exist or belongs to somebody
+		// else, so this is not a way to enumerate device ids.
+		writeErr(w, http.StatusForbidden, "that key does not own a device with that id", "")
+		return
+	} else if err != nil {
+		log.Printf("release device: %v", err)
+		writeErr(w, http.StatusInternalServerError, "could not release the device", "")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
