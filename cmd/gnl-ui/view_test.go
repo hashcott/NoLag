@@ -84,3 +84,21 @@ func TestFaultCarriesItsReason(t *testing.T) {
 		t.Errorf("healthy connection has problem %q", v.problem)
 	}
 }
+
+func TestFootnoteSaysWhyItIsNotUp(t *testing.T) {
+	// The mini panel has room for one line under the numbers. When the state is
+	// not UP, that line is the reason, or somebody looking at OFF has to open the
+	// tray menu to learn the service is not running.
+	if f := viewOf(ipc.Response{}, ipc.ErrNoService).footnote(); f != friendly(ipc.ErrNoService) {
+		t.Errorf("service down: footnote %q", f)
+	}
+	if f := viewOf(ipc.Response{Error: "relay unreachable"}, nil).footnote(); f != "Not connected — relay unreachable" {
+		t.Errorf("idle with a reason: footnote %q", f)
+	}
+	if f := viewOf(ipc.Response{State: "connected", Error: "route apply failed"}, nil).footnote(); f != "! route apply failed" {
+		t.Errorf("fault: footnote %q", f)
+	}
+	if f := viewOf(ipc.Response{State: "connected"}, nil).footnote(); f != "" {
+		t.Errorf("healthy: footnote %q, want none", f)
+	}
+}

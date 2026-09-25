@@ -79,3 +79,15 @@ func viewOf(resp ipc.Response, err error) view {
 	}
 	return v
 }
+
+// footnote is the one line under the numbers: why the state is not UP, or
+// nothing when it is.
+func (v view) footnote() string {
+	switch {
+	case v.problem != "":
+		return "! " + v.problem
+	case v.state == stateOn:
+		return ""
+	}
+	return v.line
+}

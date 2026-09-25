@@ -98,6 +98,8 @@ type ui struct {
 
 	// busy is set while a verb is in flight, and read only on the GUI thread.
 	busy bool
+	// pending is what the window's button says while busy.
+	pending string
 	// shown is the state the icon is currently displaying, so a notification is
 	// raised on a change rather than on every poll.
 	shown state
@@ -188,7 +190,7 @@ func (u *ui) send(v ipc.Verb, pending string) {
 	if u.busy {
 		return
 	}
-	u.busy = true
+	u.busy, u.pending = true, pending
 	u.setBusy(pending)
 
 	go func() {
@@ -225,6 +227,12 @@ func (u *ui) pollLoop() {
 			// Recorded even while a verb is in flight, so the chart's spacing stays
 			// one poll per slot.
 			u.hist.add(sampleFrom(time.Now(), resp, err))
+			// The window and its log follow polls only. A verb's reply is partial —
+			// a disconnect names no game, a failed connect names nothing — so
+			// reading one as a poll logs changes that never happened. The next
+			// poll, at most three seconds later, reports the real ones.
+			u.view = viewOf(resp, err)
+			u.log.record(time.Now(), resp, err)
 			if u.busy {
 				return // a verb is in flight; its own answer is fresher than this
 			}
@@ -263,8 +271,6 @@ func (u *ui) show(resp ipc.Response, err error) {
 		u.shown = next
 	}
 
-	u.view = viewOf(resp, err)
-	u.log.record(time.Now(), resp, err)
 	if u.win != nil {
 		u.win.refresh()
 	}

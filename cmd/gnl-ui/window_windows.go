@@ -3,6 +3,7 @@
 package main
 
 import (
+	"time"
 	"unsafe"
 
 	"github.com/lxn/walk"
@@ -21,6 +22,12 @@ const (
 	sparkBars = 12
 
 	spiGetWorkArea = 0x0030
+
+	// doubleClick is how soon a second press on the tray icon is taken as the
+	// other half of a double-click rather than a second toggle.
+	// ponytail: Windows' default, not GetDoubleClickTime; read it if anybody's
+	// setting differs enough to matter.
+	doubleClick = 500 * time.Millisecond
 )
 
 var (
@@ -56,6 +63,9 @@ type panels struct {
 	miniBody, fullBody *walk.CustomWidget
 	miniAct, fullAct   *walk.PushButton
 	fullReload         *walk.PushButton
+	// buttons per window, in Tab order.
+	miniKeys, fullKeys []*walk.PushButton
+	lastToggle         time.Time
 
 	font, fontBig, fontHuge *walk.Font
 	bg                      *walk.SolidColorBrush
@@ -108,10 +118,12 @@ func (w *panels) buildMini() error {
 		return err
 	}
 	fixHeight(w.miniHead, 28)
-	if _, err := w.smallButton(top, "+", w.showFull); err != nil {
+	expand, err := w.smallButton(top, "+", w.showFull)
+	if err != nil {
 		return err
 	}
-	if _, err := w.smallButton(top, "×", mw.Hide); err != nil {
+	hide, err := w.smallButton(top, "×", mw.Hide)
+	if err != nil {
 		return err
 	}
 	if w.miniBody, err = w.canvas(mw, w.paintMiniBody); err != nil {
@@ -120,6 +132,8 @@ func (w *panels) buildMini() error {
 	if w.miniAct, err = w.button(mw, "Connect", w.act); err != nil {
 		return err
 	}
+	w.miniKeys = []*walk.PushButton{w.miniAct, expand, hide}
+	keyboard(w.miniKeys, []func(){w.act, w.showFull, mw.Hide})
 	borderless(mw)
 	return nil
 }
@@ -139,7 +153,8 @@ func (w *panels) buildFull() error {
 		return err
 	}
 	fixHeight(w.fullHead, 28)
-	if _, err := w.smallButton(top, "−", w.collapse); err != nil {
+	shrink, err := w.smallButton(top, "−", w.collapse)
+	if err != nil {
 		return err
 	}
 	if w.fullBody, err = w.canvas(mw, w.paintFullBody); err != nil {
@@ -152,11 +167,12 @@ func (w *panels) buildFull() error {
 	if w.fullAct, err = w.button(bottom, "Connect", w.act); err != nil {
 		return err
 	}
-	if w.fullReload, err = w.button(bottom, "Refresh game list", func() {
-		w.u.send(ipc.VerbReloadProfile, "Refreshing…")
-	}); err != nil {
+	reload := func() { w.u.send(ipc.VerbReloadProfile, "Refreshing…") }
+	if w.fullReload, err = w.button(bottom, "Refresh game list", reload); err != nil {
 		return err
 	}
+	w.fullKeys = []*walk.PushButton{w.fullAct, w.fullReload, shrink}
+	keyboard(w.fullKeys, []func(){w.act, reload, w.collapse})
 	if _, err := walk.NewHSpacer(bottom); err != nil {
 		return err
 	}
@@ -235,7 +251,9 @@ func (w *panels) canvas(parent walk.Container, paint func(p *painter)) (*walk.Cu
 	if err != nil {
 		return nil, err
 	}
-	cw.SetPaintMode(walk.PaintNoErase)
+	// Buffered: the whole canvas is redrawn every poll, and drawn straight to the
+	// screen that is a visible flicker every three seconds.
+	cw.SetPaintMode(walk.PaintBuffered)
 	cw.SetInvalidatesOnResize(true)
 	return cw, nil
 }
@@ -245,8 +263,10 @@ func fixHeight(cw *walk.CustomWidget, h int) {
 	_ = cw.SetMinMaxSize(walk.Size{Height: h}, walk.Size{Height: h})
 }
 
-// borderless turns the mini panel into a topmost tool window: no title bar, no
-// taskbar button, above other windows but not above a fullscreen game.
+// borderless turns the mini panel into a topmost tool window: no title bar and
+// no taskbar button. Topmost puts it above a game in borderless or windowed mode
+// — which is where it is useful as a glance at the link while playing — but not
+// above one in exclusive fullscreen.
 func borderless(mw *walk.MainWindow) {
 	h := mw.Handle()
 	style := uint32(win.WS_POPUP | win.WS_BORDER)
@@ -268,6 +288,10 @@ func workArea() win.RECT {
 }
 
 func (w *panels) toggleMini() {
+	if time.Since(w.lastToggle) < doubleClick {
+		return
+	}
+	w.lastToggle = time.Now()
 	if w.mini.Visible() {
 		w.mini.Hide()
 		return
@@ -286,6 +310,7 @@ func (w *panels) showMini() {
 	})
 	w.mini.Show()
 	win.SetWindowPos(w.mini.Handle(), win.HWND_TOPMOST, 0, 0, 0, 0, win.SWP_NOMOVE|win.SWP_NOSIZE)
+	_ = w.miniAct.SetFocus()
 	w.refresh()
 }
 
@@ -293,6 +318,7 @@ func (w *panels) showFull() {
 	w.mini.Hide()
 	w.full.Show()
 	_ = w.full.Activate()
+	_ = w.fullAct.SetFocus()
 	w.refresh()
 }
 
@@ -315,8 +341,12 @@ func (w *panels) act() {
 func (w *panels) refresh() {
 	v := w.u.view
 	enabled := v.canAct && !w.u.busy
+	label := v.button
+	if w.u.busy {
+		label = w.u.pending
+	}
 	for _, b := range []*walk.PushButton{w.miniAct, w.fullAct} {
-		_ = b.SetText(v.button)
+		_ = b.SetText(label)
 		b.SetEnabled(enabled)
 	}
 	w.fullReload.SetEnabled(enabled)
@@ -355,8 +385,12 @@ func (w *panels) paintMiniBody(p *painter) {
 		p.text(kv[1], w.font, cText, walk.Rectangle{X: x + p.s(60), Y: y, Width: wd - p.s(60), Height: p.s(20)}, walk.TextRight)
 		y += p.s(20)
 	}
-	if line := problemLine(v); line != "" {
-		p.text(line, w.font, colour(accentFault), walk.Rectangle{X: x, Y: y + p.s(4), Width: wd, Height: p.s(20)}, walk.TextLeft)
+	if note := v.footnote(); note != "" {
+		c := cDim
+		if v.problem != "" {
+			c = colour(accentFault)
+		}
+		p.text(note, w.font, c, walk.Rectangle{X: x, Y: y + p.s(4), Width: wd, Height: p.s(20)}, walk.TextLeft)
 	}
 }
 
@@ -389,8 +423,8 @@ func (w *panels) paintFullBody(p *painter) {
 	// Event log, with the one-line summary or the fault above it.
 	ey := chart.Y + chart.Height + gap
 	status, colourOf := v.line, cDim
-	if line := problemLine(v); line != "" {
-		status, colourOf = line, colour(accentFault)
+	if v.problem != "" {
+		status, colourOf = v.footnote(), colour(accentFault)
 	}
 	p.text(status, w.font, colourOf, walk.Rectangle{X: x, Y: ey, Width: wd, Height: p.s(18)}, walk.TextLeft)
 	ey += p.s(22)
@@ -469,11 +503,26 @@ func rttColour(v view) walk.Color {
 	return cBright
 }
 
-func problemLine(v view) string {
-	if v.problem == "" {
-		return ""
+// keyboard gives a window's buttons Tab and Enter. walk runs the dialog
+// navigation only for the form that owns the message loop, which is the hidden
+// tray window, so these windows get neither unless they handle the keys
+// themselves.
+func keyboard(buttons []*walk.PushButton, actions []func()) {
+	for i, b := range buttons {
+		i, act := i, actions[i]
+		b.KeyDown().Attach(func(key walk.Key) {
+			switch key {
+			case walk.KeyReturn:
+				act()
+			case walk.KeyTab:
+				step := 1
+				if walk.ShiftDown() {
+					step = len(buttons) - 1
+				}
+				_ = buttons[(i+step)%len(buttons)].SetFocus()
+			}
+		})
 	}
-	return "! " + v.problem
 }
 
 // painter draws in native pixels; s scales a 96-dpi length to them.

@@ -14,13 +14,13 @@ type poll struct {
 }
 
 var (
-	idle   = poll{resp: ipc.Response{OK: true}}
+	idle   = poll{resp: ipc.Response{OK: true, State: "disconnected"}}
 	onA    = poll{resp: ipc.Response{OK: true, State: "connected", RelayID: "rly-a"}}
 	down   = poll{err: ipc.ErrNoService}
 	onB    = poll{resp: ipc.Response{OK: true, State: "connected", RelayID: "rly-b"}}
 	onGame = poll{resp: ipc.Response{OK: true, State: "connected", RelayID: "rly-a", GameRunning: "Valorant"}}
 	onBad  = poll{resp: ipc.Response{OK: true, State: "connected", RelayID: "rly-a", Error: "route apply failed"}}
-	offWhy = poll{resp: ipc.Response{OK: true, Error: "relay unreachable"}}
+	offWhy = poll{resp: ipc.Response{OK: true, State: "disconnected", Error: "relay unreachable"}}
 )
 
 // replay records polls in order and returns the texts logged by the last one.
@@ -110,5 +110,18 @@ func TestEventLogIsCapped(t *testing.T) {
 	}
 	if got := len(l.recent(maxEvents + 5)); got != maxEvents {
 		t.Errorf("recent past the cap returned %d, want %d", got, maxEvents)
+	}
+}
+
+func TestAReplyWithoutAStateLogsNothing(t *testing.T) {
+	// A failed connect or reload answers {OK:false, Error} and nothing else. Read
+	// as a poll it would log a disconnect, and then a reconnect three seconds
+	// later, while the tunnel never went down.
+	failed := poll{resp: ipc.Response{OK: false, Error: "profile fetch failed"}}
+	if es := replay(onGame, failed); len(es) != 0 {
+		t.Errorf("a stateless reply logged %q", texts(es))
+	}
+	if es := replay(onGame, failed, onGame); len(es) != 0 {
+		t.Errorf("the poll after a stateless reply logged %q", texts(es))
 	}
 }

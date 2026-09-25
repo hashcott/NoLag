@@ -114,7 +114,14 @@ type eventLog struct {
 }
 
 // record compares one poll with the one before it.
+//
+// A reply that answered but names no state is not a poll: a failed connect or
+// reload says only that it failed, and comparing it with the last poll would
+// log a disconnect that never happened.
 func (l *eventLog) record(at time.Time, resp ipc.Response, err error) {
+	if err == nil && resp.State == "" {
+		return
+	}
 	cur := observe(resp, err)
 	prev := l.prev
 	if !l.started {
