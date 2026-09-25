@@ -27,7 +27,7 @@
 param(
   [Parameter(Mandatory = $true)][string]$ContributorKey,
   [Parameter(Mandatory = $true)][string]$ControlUrl,
-  [string]$BinarySource = "$PSScriptRoot\gnl-service.exe"
+  [string]$SourceDir = $PSScriptRoot
 )
 
 $ErrorActionPreference = 'Stop'
@@ -37,11 +37,21 @@ $installDir  = Join-Path $env:ProgramFiles 'GameNoLag'
 $dataDir     = Join-Path $env:ProgramData  'GameNoLag'
 $binary      = Join-Path $installDir 'gnl-service.exe'
 
+# The service and the tray interface, plus the manifest the interface needs:
+# without it the tray menu will not create, and it is read from beside the exe
+# because Go binaries carry no embedded manifest.
+$payload = @('gnl-service.exe', 'gnl-ui.exe', 'gnl-ui.exe.manifest')
+
 if ($ControlUrl -notmatch '^https://') {
   throw "ControlUrl must be https: the contributor key would otherwise travel in clear."
 }
-if (-not (Test-Path $BinarySource)) {
-  throw "Cannot find $BinarySource. Build it with: GOOS=windows GOARCH=amd64 go build -o gnl-service.exe ./cmd/gnl-service"
+foreach ($file in $payload) {
+  if (-not (Test-Path (Join-Path $SourceDir $file))) {
+    throw "Cannot find $file in $SourceDir. Build with:`n" +
+          "  GOOS=windows GOARCH=amd64 go build -o gnl-service.exe ./cmd/gnl-service`n" +
+          "  GOOS=windows GOARCH=amd64 go build -ldflags -H=windowsgui -o gnl-ui.exe ./cmd/gnl-ui`n" +
+          "  cp deploy/windows/gnl-ui.exe.manifest ."
+  }
 }
 
 # Stop an earlier install before replacing its binary. A running service holds
@@ -55,7 +65,9 @@ if ($existing) {
 }
 
 New-Item -ItemType Directory -Force -Path $installDir, $dataDir | Out-Null
-Copy-Item -Path $BinarySource -Destination $binary -Force
+foreach ($file in $payload) {
+  Copy-Item -Path (Join-Path $SourceDir $file) -Destination (Join-Path $installDir $file) -Force
+}
 
 # Both directories: inherited permissions from ProgramData let authenticated
 # users create files, and the data directory holds a private key.
@@ -81,5 +93,22 @@ sc.exe description $serviceName "Routes game traffic through a GameNoLag relay."
 # are non-persistent so the machine is fine without it.
 sc.exe failure $serviceName reset= 86400 actions= restart/5000/restart/20000/"" | Out-Null
 
+# The tray interface starts for whoever logs in. It holds no privilege, so this
+# is HKLM rather than per-user only because the service is machine-wide too.
+$runKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run'
+Set-ItemProperty -Path $runKey -Name 'GameNoLag' -Value "`"$(Join-Path $installDir 'gnl-ui.exe')`""
+
+$startMenu = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\GameNoLag.lnk'
+$shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($startMenu)
+$shortcut.TargetPath = Join-Path $installDir 'gnl-ui.exe'
+$shortcut.Description = 'GameNoLag'
+$shortcut.Save()
+
 Start-Service -Name $serviceName
+
 Write-Host "Installed. Log: $(Join-Path $dataDir 'service.log')"
+# Deliberately not started from here. This script runs elevated, so anything it
+# launches runs elevated too, and the tray icon would appear in the
+# administrator's session rather than the player's. It holds no privilege and
+# should not have any.
+Write-Host "Start GameNoLag from the Start Menu; it will start by itself at every logon after this."

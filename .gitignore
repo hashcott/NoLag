@@ -4,6 +4,9 @@
 /gnl-agent
 /gnl-control
 /gnl-relaycheck
+/gnl-profile
+/gnl-service.exe
+/gnl-ui.exe
 
 # Measurement campaign output
 *.jsonl

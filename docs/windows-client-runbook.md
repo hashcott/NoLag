@@ -1,8 +1,8 @@
 # Windows client runbook
 
 What the client is, how to install it, and what to look at when a machine
-misbehaves. The client is two processes: a service that holds every privilege,
-and a user interface that holds none.
+misbehaves. The client is two processes: `gnl-service`, which holds every
+privilege, and `gnl-ui`, a tray icon that holds none.
 
 ## Why there is a service at all
 
@@ -39,14 +39,19 @@ software: stop the service, or reboot. Both restore the machine completely.
 
 ## Installing
 
-Build and install:
+Build both halves:
 
 ```
 GOOS=windows GOARCH=amd64 go build -o gnl-service.exe ./cmd/gnl-service
+GOOS=windows GOARCH=amd64 go build -ldflags -H=windowsgui -o gnl-ui.exe ./cmd/gnl-ui
 ```
 
-Copy `gnl-service.exe` next to `deploy/windows/install.ps1` on the target
-machine, then from an administrator PowerShell:
+`-H=windowsgui` on the interface only. Without it a console window opens behind
+the tray icon and stays there.
+
+Copy `gnl-service.exe`, `gnl-ui.exe` and `deploy/windows/gnl-ui.exe.manifest`
+next to `deploy/windows/install.ps1` on the target machine, then from an
+administrator PowerShell:
 
 ```powershell
 .\install.ps1 -ContributorKey GNL-XXXX-XXXX-XXXX -ControlUrl https://api.example.com
@@ -55,11 +60,21 @@ machine, then from an administrator PowerShell:
 The script refuses a non-https control URL, because the contributor key travels
 as a bearer token.
 
-It puts the binary in `C:\Program Files\GameNoLag` (readable by users so the
+It puts the binaries in `C:\Program Files\GameNoLag` (readable by users so the
 interface can launch, writable only by administrators — a LocalSystem binary an
 ordinary user can replace is a way for that user to become LocalSystem) and the
 state in `C:\ProgramData\GameNoLag`, readable by nobody but SYSTEM and
 Administrators, because it holds this machine's private key.
+
+It also registers the tray icon to start at every logon and puts it in the Start
+Menu. It does **not** launch it: the installer runs elevated, so anything it
+starts runs elevated too, and the tray icon would end up in the administrator's
+session rather than the player's. It holds no privilege and should not have any.
+
+The manifest has to travel with `gnl-ui.exe`. Go binaries carry no embedded
+manifest, so Windows reads `gnl-ui.exe.manifest` from beside the binary; without
+it the tray menu will not create, and the icon is drawn at 96 dpi and scaled up
+by Windows on the high-resolution screen a gaming machine tends to have.
 
 Removing it:
 
@@ -176,8 +191,39 @@ Run it in a console to watch it live. It still needs LocalSystem:
 psexec -s -i C:\"Program Files"\GameNoLag\gnl-service.exe
 ```
 
-## What is not built yet
+## The tray icon
 
-The user interface. Everything it will need is in place — the pipe, the four
-verbs, and the status reply carrying state, relay, game, route count and round
-trip.
+The whole interface is: are my packets going through a relay, which one, and how
+fast. That fits in an icon, a tooltip and a short menu, so there is no window —
+a window would only be somewhere to put things nobody asked for.
+
+The icon is a ring, drawn in code rather than shipped as a resource, because an
+`.ico` needs a resource compiler that does not run on the machine this is built
+on. Filled means connected, hollow means not, so the two are distinct in shape
+as well as colour — many people cannot rely on the colour alone.
+
+| Icon | Meaning |
+| --- | --- |
+| Grey ring | Not connected, or the service is not running |
+| Green filled ring | Connected; a game's traffic is on the relay when one is running |
+| Red filled ring | Connected but complaining — a relay went away, or routes failed to install |
+
+The menu's first item is the status itself, disabled so it reads as a label. A
+tray menu that makes somebody click something to find out what is going on is a
+menu that will be clicked at the worst moment.
+
+**Exit does not disconnect.** The service keeps the tunnel up, which is what
+somebody who closes a tray icon mid-game wants. Disconnecting is its own item,
+one line above.
+
+It polls status every three seconds, so the icon also follows changes it did not
+ask for — a game starting, a relay dying.
+
+Only one copy runs, held by a `Local\GameNoLagTray` mutex. Local rather than
+Global: the tray icon belongs to the person logged in, and two people switched
+between accounts on one machine may each have their own.
+
+**Open log folder** will give an ordinary user an access-denied window from
+Explorer, because that directory holds this machine's private key. That is the
+right outcome, and it still tells somebody on the phone with support exactly
+where to look.

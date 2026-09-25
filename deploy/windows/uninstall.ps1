@@ -28,6 +28,12 @@ if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {
   Write-Host "The $serviceName service is not installed."
 }
 
+Get-Process -Name 'gnl-ui' -ErrorAction SilentlyContinue | Stop-Process -Force
+
+Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' `
+  -Name 'GameNoLag' -ErrorAction SilentlyContinue
+Remove-Item -Force -ErrorAction SilentlyContinue `
+  -Path (Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\GameNoLag.lnk')
 Remove-Item -Recurse -Force -Path $installDir -ErrorAction SilentlyContinue
 
 if ($Purge) {
