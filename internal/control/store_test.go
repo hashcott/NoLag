@@ -597,3 +597,80 @@ func TestReleaseDeviceFreesASlot(t *testing.T) {
 		t.Errorf("%d devices left after release, want 0", n)
 	}
 }
+
+func TestPublishProfileVersionsMonotonically(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+
+	v1, err := s.PublishProfile(ctx, []string{"20.24.48.0/20"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v2, err := s.PublishProfile(ctx, []string{"20.24.48.0/20", "52.139.208.0/20"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v2 <= v1 {
+		t.Errorf("versions went %d then %d; they must only move forward", v1, v2)
+	}
+	// Agents fetch the newest.
+	prof, err := s.Profile(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prof.Version != v2 || len(prof.CIDRs) != 2 {
+		t.Errorf("Profile = %+v, want version %d with two CIDRs", prof, v2)
+	}
+	// The old version is still there, so re-publishing it is a normal operation
+	// rather than a restore.
+	var kept int
+	s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM game_profile`).Scan(&kept)
+	if kept != 2 {
+		t.Errorf("%d profile versions kept, want both", kept)
+	}
+}
+
+// An empty profile means "forward nothing". It is a real state, but never one to
+// reach by accident - every path producing one is a bug upstream.
+func TestPublishRefusesAnEmptyProfile(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	if _, err := s.PublishProfile(ctx, nil); err == nil {
+		t.Error("published an empty profile")
+	}
+}
+
+func TestObservationsAccumulateReportCounts(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+
+	for i := 0; i < 3; i++ {
+		if err := s.RecordObservation(ctx, "pubg", "20.24.50.9", 20522); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.RecordObservation(ctx, "pubg", "20.24.51.4", 20522); err != nil {
+		t.Fatal(err)
+	}
+
+	var reports int
+	s.pool.QueryRow(ctx,
+		`SELECT reports FROM observed_address WHERE dst_ip = '20.24.50.9'`).Scan(&reports)
+	if reports != 3 {
+		t.Errorf("reports = %d after three sightings, want 3: the three-tier rule "+
+			"needs to tell one contributor's lead from several independent ones", reports)
+	}
+
+	got, err := s.ObservedAddresses(ctx, "pubg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Errorf("observed %v, want the two distinct addresses", got)
+	}
+	// A different game must not see them.
+	other, _ := s.ObservedAddresses(ctx, "cs2")
+	if len(other) != 0 {
+		t.Errorf("another game sees %v; mixing two games' addresses cannot be undone", other)
+	}
+}

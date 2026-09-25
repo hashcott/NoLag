@@ -616,3 +616,64 @@ func (s *Store) ReleaseDevice(ctx context.Context, contributorKey, deviceID stri
 	}
 	return nil
 }
+
+// PublishProfile stores a new game profile version and returns it.
+//
+// Versions are append-only and the agents always fetch the newest. Keeping the
+// old rows is what makes a bad publish recoverable: re-publishing the previous
+// CIDR list is a normal operation rather than a restore.
+func (s *Store) PublishProfile(ctx context.Context, cidrs []string) (int, error) {
+	if len(cidrs) == 0 {
+		// An empty profile is a real state - it means forward nothing - but it is
+		// never something to publish by accident, and every path that produces one
+		// is a bug somewhere upstream.
+		return 0, fmt.Errorf("control: refusing to publish an empty profile")
+	}
+	var version int
+	err := s.pool.QueryRow(ctx,
+		`INSERT INTO game_profile (version, cidrs)
+		 VALUES ((SELECT COALESCE(MAX(version), 0) + 1 FROM game_profile), $1)
+		 RETURNING version`, cidrs).Scan(&version)
+	if err != nil {
+		return 0, fmt.Errorf("control: publish profile: %w", err)
+	}
+	return version, nil
+}
+
+// ObservedAddresses returns every address contributors have reported for a game.
+func (s *Store) ObservedAddresses(ctx context.Context, gameID string) ([]string, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT DISTINCT dst_ip FROM observed_address WHERE game_id = $1 ORDER BY dst_ip`, gameID)
+	if err != nil {
+		return nil, fmt.Errorf("control: read observations: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var ip string
+		if err := rows.Scan(&ip); err != nil {
+			return nil, fmt.Errorf("control: scan observation: %w", err)
+		}
+		out = append(out, ip)
+	}
+	return out, rows.Err()
+}
+
+// RecordObservation stores one address seen carrying a game's traffic.
+//
+// Only the destination is kept. Not the payload, not the source, not who
+// reported it - the profile needs the address and nothing else, and storing
+// more would make this a record of what people were doing rather than of where
+// the game lives.
+func (s *Store) RecordObservation(ctx context.Context, gameID, dstIP string, dstPort int) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO observed_address (game_id, dst_ip, dst_port, reports)
+		 VALUES ($1,$2,$3,1)
+		 ON CONFLICT (game_id, dst_ip, dst_port)
+		 DO UPDATE SET reports = observed_address.reports + 1, last_seen = now()`,
+		gameID, dstIP, dstPort)
+	if err != nil {
+		return fmt.Errorf("control: record observation: %w", err)
+	}
+	return nil
+}
