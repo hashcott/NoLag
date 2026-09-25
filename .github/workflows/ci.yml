@@ -1,0 +1,87 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # Windows as well as Linux: the client was written on macOS and none of it
+    # had run on the platform it ships for.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        if: runner.os == 'Linux'
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - run: go vet ./...
+      - name: go vet (windows build of the client, from Linux)
+        if: runner.os == 'Linux'
+        run: GOOS=windows go vet ./...
+      - run: go test -count=1 ./...
+
+  firewall:
+    # iptables and ipset against a real kernel, in a privileged container so the
+    # runner's own firewall is left alone. The same script developers run.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./deploy/verify-firewall-in-docker.sh
+
+  build:
+    needs: [test, firewall]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: relay and control plane (linux/amd64)
+        env:
+          GOOS: linux
+          GOARCH: amd64
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p dist/linux
+          for c in gnl-agent gnl-control gnl-probe gnl-analyze gnl-profile gnl-relaycheck; do
+            go build -trimpath -o dist/linux/$c ./cmd/$c
+          done
+      - name: Windows client (windows/amd64)
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p dist/windows
+          go build -trimpath -o dist/windows/gnl-service.exe ./cmd/gnl-service
+          # -H=windowsgui on the interface only; without it a console window opens
+          # behind the tray icon and stays there.
+          go build -trimpath -ldflags -H=windowsgui -o dist/windows/gnl-ui.exe ./cmd/gnl-ui
+          # The manifest has to travel with gnl-ui.exe, and install.ps1 expects
+          # all of them side by side.
+          cp deploy/windows/gnl-ui.exe.manifest deploy/windows/install.ps1 deploy/windows/uninstall.ps1 dist/windows/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gamenolag-linux-amd64
+          path: dist/linux/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gamenolag-windows-amd64
+          path: dist/windows/
+          if-no-files-found: error
