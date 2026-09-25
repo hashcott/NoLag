@@ -1,178 +1,142 @@
 # GameNoLag
 
+**Steadier ping for players in Vietnam, through community-run relays next to the game servers.**
+
 [![ci](https://github.com/hashcott/NoLag/actions/workflows/ci.yml/badge.svg)](https://github.com/hashcott/NoLag/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 **English** · [Tiếng Việt](README.vi.md) · [简体中文](README.zh-CN.md)
 
-GameNoLag sends a game's traffic from a player in Vietnam through a WireGuard
-relay near the game servers, for the hours when that path beats the ISP's
-default route. Only the game goes through the relay. Everything else on the
-machine stays on its ordinary internet path.
+Players in Vietnam are usually matched to game servers in Singapore, and to
+Tokyo when the matchmaker spills over. In the evening, the ISP's route there is
+often congested, and ping jumps and packets drop in the middle of a match. A VPS in Singapore, on a different
+provider with different transit, can often reach the same servers on a cleaner
+path.
 
-The relays are VPSes contributed by the community. A contributor gets a key.
-The key activates up to three of their own machines, and those machines are
-routed through the fleet.
+GameNoLag puts that path under your game. It sends **only your game's traffic**
+through a WireGuard relay close to the game servers. It picks the relay by
+measuring your own connection, and it steps aside the moment something goes
+wrong. The relays are VPSes contributed by the community.
 
-> **Status: early.** Every component below exists and is tested. The Windows
-> client has passed CI on Windows but has not yet been run by a player; the
-> manual checklist in the [client runbook](docs/windows-client-runbook.md#the-window)
-> is the gate before it is.
+> **Status: early, not yet in players' hands.** Every component is built and
+> tested in CI, on Linux and Windows and against a real kernel and database.
+> The Windows client has not yet been run by a player. The
+> [manual Windows checklist](docs/windows-client-runbook.md#the-window) comes
+> first.
+
+## Why it is different
+
+- **Only the game.** It is not a VPN. Routes are installed for a game's servers
+  while that game runs, and removed when it exits. Your browser, Discord and
+  downloads never leave your normal connection.
+- **Your path decides.** Every candidate relay is measured with a real
+  WireGuard handshake from your PC, and the fastest wins. It does not switch in
+  the middle of a match for a small gain.
+- **It never touches the game.** A game is recognised by its process name, the
+  same way Task Manager lists it. Nothing opens, reads or injects into a game
+  process.
+- **It fails safe.** When a relay dies, the client moves to another one. When
+  none answers, it removes its routes and your game carries on over your ISP.
+  Stopping the service or rebooting leaves nothing behind.
+- **Relays cannot be abused.** A relay forwards only to published game address
+  ranges, rate-capped per player. It is verified from the outside before it is
+  used, and revoking a contributor removes them from the network within one
+  sync.
 
 ## How it works
 
 ```
- Player's PC (Windows)                     Contributed VPS                Game servers
-┌─────────────────────────────┐          ┌──────────────────┐        ┌──────────────┐
-│ gnl-ui  (tray + window,     │          │ WireGuard (wg0)  │        │ AWS / Azure  │
-│          no privilege)      │          │ gnl-agent        │        │ Singapore,   │
-│    │ named pipe, 4 verbs    │  UDP     │  - peers         │        │ Tokyo        │
-│    ▼                        │ ═══════► │  - egress        │ ─────► │              │
-│ gnl-service (LocalSystem)   │ WireGuard│    allowlist     │        │              │
-│  - measures every relay     │          │  - rate limit    │        │              │
-│  - routes only game ranges  │          └────────┬─────────┘        └──────────────┘
-└────────────┬────────────────┘                   │ sync every 10 s
-             │ HTTPS: session, profile            │
-             ▼                                    ▼
-        ┌──────────────────────────────────────────────┐
-        │ gnl-control + Postgres                       │
-        │ keys, devices, relays, published game ranges │
-        └──────────────────────────────────────────────┘
+  Your PC (Windows)                 Relay (community VPS)           Game server
+ ┌────────────────────┐  WireGuard  ┌──────────────────────┐        ┌───────────┐
+ │ game traffic only  │ ══════════► │ game ranges only,    │ ─────► │ Singapore │
+ │ fastest relay wins │             │ rate-capped          │        │ Tokyo     │
+ └─────────┬──────────┘             └──────────┬───────────┘        └───────────┘
+           │ HTTPS                             │ sync every 10 s
+           ▼                                   ▼
+       ┌──────────────────────────────────────────────────┐
+       │ Control plane: keys, devices, relays, game ranges │
+       └──────────────────────────────────────────────────┘
 ```
 
-- **The client measures, the control plane filters.** The control plane hands
-  out the relays that are up and trusted. The client handshakes each one over
-  the player's own path and picks the fastest. The control plane cannot rank
-  relays, because it has no view of any player's path.
-- **Game ranges are narrow and cross-checked.** An address reaches the published
-  profile only after three independent contributors have seen it, and only if
-  it falls inside a range AWS, Azure or the game's ASN publishes. Routes are
-  installed while the game runs and removed when it exits.
-- **Failure falls back to the ordinary path.** If the relay stops answering,
-  the client moves to another one. If none answers, it removes its routes. The
-  tunnel adapter and every route vanish when the service stops. Rebooting
-  restores the machine completely.
+The control plane decides who may use which relay and publishes the game
+address ranges. It is never on the path your packets take. Game ranges are
+kept narrow: an address is added only after three independent contributors
+have seen it, and only if it lies inside a range that AWS, Azure or the game's
+network announces.
 
-## Components
+More detail: [Architecture](docs/en/architecture.md).
 
-| Command | Runs on | What it does |
+## Get started
+
+| I want to… | Start here |
+|---|---|
+| **Play** with lower, steadier ping | [User guide](docs/en/user-guide.md) |
+| **Contribute a VPS** as a relay | [Setting up a relay](docs/en/setup-relay.md) |
+| **Run a deployment** for a community | [Setting up the control plane](docs/en/setup-control-plane.md), then the [deployment order](docs/en/README.md#bringing-up-a-whole-deployment-in-order) |
+| **Install or package** the Windows client | [Setting up the client](docs/en/setup-client.md) |
+| **Hack on it** | [Development](#development) and [CONTRIBUTING](CONTRIBUTING.md) |
+
+Players need a contributor key from whoever runs the deployment. In the current
+phase, a key is issued to people who contribute a relay, and each key covers up
+to three of their own PCs.
+
+## What is in the box
+
+| Binary | Runs on | Role |
 |---|---|---|
-| `gnl-service` | Windows, LocalSystem | Holds the tunnel. Fetches the session and profile, measures relays, installs and removes routes. |
-| `gnl-ui` | Windows, as the user | Tray icon, mini panel and full window. Asks the service for one of `connect`, `disconnect`, `status`, `reload-profile`, and nothing else. |
-| `gnl-control` | Linux | Control plane: contributor keys, device slots, relay registration and sync, the game profile. Also mints keys (`-mint-key`). |
-| `gnl-agent` | Linux relay | Reconciles WireGuard peers, the egress allowlist (ipset) and the firewall with the control plane. |
-| `gnl-relaycheck` | Anywhere outside the relay | Proves a relay's UDP port is reachable from the internet, and reports that to the control plane. |
-| `gnl-profile` | Operator | Builds a game's CIDR list from observed addresses and published ranges. Dry-run unless `-publish` is given. |
-| `gnl-probe`, `gnl-analyze` | Measurement hosts | The P0 route-quality campaign: is a VPS path better than the ISP's at peak? |
-
-## Repository layout
-
-```
-cmd/            one directory per binary above
-internal/
-  api/          request and response types shared by client, relay and control plane
-  control/      HTTP server, Postgres store, schema, rate limits
-  agent/        relay firewall rules and the sync loop
-  ipsetsync/    atomic ipset swaps for the egress allowlist
-  wgsync/       WireGuard peer reconciliation
-  profile/      turning observations and published ranges into a narrow profile
-  probe/, analyze/, stats/   the P0 measurement campaign
-  client/       the Windows client: ipc, routes, wintun, winpipe, gamewatch, pick, …
-deploy/         relay installer, Windows install/uninstall, verification scripts
-docs/           runbooks and guides (see below)
-```
+| `gnl-service` | Windows, as a service | Holds the tunnel, measures relays, routes the running game |
+| `gnl-ui` | Windows, as the user | Tray icon, mini panel and full window. No privileges |
+| `gnl-control` | Linux | Control plane: keys, device slots, relays, game profiles |
+| `gnl-agent` | Each relay | Keeps WireGuard peers, the egress allowlist and the firewall in sync |
+| `gnl-relaycheck` | Outside a relay | Proves a relay is reachable from the internet |
+| `gnl-profile` | Operator | Builds a game's address list from observations and published ranges |
+| `gnl-probe`, `gnl-analyze` | Measurement hosts | Measure whether a VPS path beats the ISP at peak hours |
 
 ## Development
 
-Needs Go 1.25 or newer. Most of the code builds and tests on any OS. The
-Windows-only parts are behind build tags, and their decisions sit in
-platform-free files so they are tested everywhere.
+You need Go 1.25 or newer. Docker is needed for the kernel and database tests.
 
 ```bash
-go test ./...                       # everything that runs anywhere
-GOOS=windows go vet ./...           # the Windows client, from any OS
-./deploy/verify-firewall-in-docker.sh   # iptables/ipset against a real kernel (needs Docker)
+go test ./...                               # runs anywhere
+GOOS=windows go vet ./...                   # the Windows client, from any OS
+./deploy/verify-firewall-in-docker.sh       # relay firewall against a real kernel
+GNL_TEST_DSN=postgres://… go test ./internal/control/   # control-plane store against Postgres
 ```
 
-The firewall tests change the machine's firewall. They sit behind the
-`linuxroot` build tag and `GNL_FIREWALL_TESTS=1`, so `go test ./...` never
-touches iptables. The script runs them in a privileged throwaway container.
+Windows-only code sits behind build tags, and the decisions it makes live in
+platform-free files, so almost everything is tested on any machine. CI runs all
+of the above on every push and pull request. It also builds the Linux binaries
+and the Windows bundle as downloadable artifacts.
 
-### Building
+Build commands, conventions and the boundaries a change must not loosen are in
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
-```bash
-# Windows client
-GOOS=windows GOARCH=amd64 go build -o gnl-service.exe ./cmd/gnl-service
-GOOS=windows GOARCH=amd64 go build -ldflags -H=windowsgui -o gnl-ui.exe ./cmd/gnl-ui
+## Security
 
-# relay and control plane
-GOOS=linux GOARCH=amd64 go build -o gnl-agent ./cmd/gnl-agent
-GOOS=linux GOARCH=amd64 go build -o gnl-control ./cmd/gnl-control
-```
+The client has a single privilege boundary. The tray talks to the service
+through a named pipe that accepts four parameterless commands, and only from
+the logged-in user. Keys and tokens are stored only as hashes. Relays drop
+anything not bound for a game range.
 
-`gnl-ui.exe` must ship with `deploy/windows/gnl-ui.exe.manifest` beside it.
-Without the manifest the tray menu is not created.
-
-### CI
-
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push to
-`main` and every pull request:
-
-1. `gofmt`, `go vet` and `go test` on Ubuntu and on Windows. On Ubuntu it also
-   vets the Windows build.
-2. The firewall tests against a real kernel.
-3. Once both pass, it builds the Linux binaries and the Windows client bundle
-   (both executables, the manifest and the install scripts). Both are
-   downloadable from the run's artifacts.
-
-### Conventions
-
-- Commits follow Conventional Commits (`feat(client): …`, `fix(relay): …`),
-  with a body that says why.
-- Logic that decides something gets a test. Code that only calls the operating
-  system is kept thin, so what is left untested is as little as possible.
-- Comments explain why, not what.
-
-## Security model, in brief
-
-- **One privilege boundary on the client.** The UI runs unprivileged and may
-  ask the service for four verbs with no parameters. It cannot name a relay, a
-  route, a file or a command. The pipe admits only the interactively logged-in
-  user.
-- **Secrets are stored as hashes.** Contributor keys and relay tokens are
-  stored only as hashes. The device private key lives in
-  `C:\ProgramData\GameNoLag`, readable only by SYSTEM and Administrators.
-- **Relays are not open proxies.** The FORWARD policy is DROP. Egress is
-  limited to the published game ranges, and each session is capped at 64 KB/s
-  per direction. A new relay carries no traffic until its reachability is
-  proven from outside and its observation window has passed.
-- **The game is never touched.** It is detected by process name, the same way
-  Task Manager does it. The client never opens a handle into it, reads its
-  memory or injects anything.
-- **Profiles need evidence.** Observations record destination addresses only,
-  and one contributor cannot promote an address alone.
+The full list is in
+[Architecture → Security boundaries](docs/en/architecture.md#security-boundaries).
+Report vulnerabilities privately, as described in [SECURITY.md](SECURITY.md).
 
 ## Documentation
 
-Full documentation in [English](docs/en/README.md),
-[Tiếng Việt](docs/vi/README.md) and [简体中文](docs/zh-CN/README.md).
+Guides in [English](docs/en/README.md), [Tiếng Việt](docs/vi/README.md) and
+[简体中文](docs/zh-CN/README.md): user guide, client, relay and control-plane
+setup, architecture.
 
-| Guide | For |
-|---|---|
-| [User guide](docs/en/user-guide.md) | Players: install, use, troubleshoot, uninstall |
-| [Setting up the client](docs/en/setup-client.md) | Installing, configuring and packaging the Windows client |
-| [Setting up a relay](docs/en/setup-relay.md) | Contributors running a relay on a VPS |
-| [Setting up the control plane](docs/en/setup-control-plane.md) | Operators: Postgres, TLS, keys, verifying relays, game profiles |
-| [Architecture](docs/en/architecture.md) | How the parts fit, the API, relay lifecycle, security boundaries |
-
-Deep references: the [Windows client runbook](docs/windows-client-runbook.md),
-[P1 runbook](docs/p1-runbook.md) and [P0 runbook](docs/p0-runbook.md).
+In-depth runbooks (English):
+- [Windows client](docs/windows-client-runbook.md)
+- [control plane and first relay](docs/p1-runbook.md)
+- [route-quality measurement](docs/p0-runbook.md)
 
 ## Contributing
 
-Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) first, and
-report vulnerabilities privately as described in [SECURITY.md](SECURITY.md),
-not in a public issue. Everyone taking part follows the
+Issues and pull requests are welcome. Please read
+[CONTRIBUTING.md](CONTRIBUTING.md) first. Everyone taking part follows the
 [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License

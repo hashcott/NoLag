@@ -1,185 +1,141 @@
 # GameNoLag
 
+**Ping ổn định hơn cho người chơi ở Việt Nam, nhờ relay do cộng đồng vận hành đặt ngay cạnh máy chủ game.**
+
 [![ci](https://github.com/hashcott/NoLag/actions/workflows/ci.yml/badge.svg)](https://github.com/hashcott/NoLag/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 [English](README.md) · **Tiếng Việt** · [简体中文](README.zh-CN.md)
 
-GameNoLag đưa lưu lượng game của người chơi ở Việt Nam đi qua một relay
-WireGuard đặt gần máy chủ game, vào những giờ mà đường này tốt hơn route mặc
-định của nhà mạng. Chỉ game đi qua relay. Mọi thứ khác trên máy vẫn đi đường
-Internet bình thường.
+Người chơi ở Việt Nam thường được ghép vào máy chủ game ở Singapore, và sang
+Tokyo khi matchmaker quá tải. Buổi tối, đường đi của nhà mạng tới đó hay bị
+nghẽn: ping nhảy và mất gói ngay giữa trận. Một VPS ở Singapore thuộc nhà cung
+cấp khác, đi tuyến transit khác, thường tới được cùng các máy chủ đó qua một
+đường sạch hơn.
 
-Các relay là VPS do cộng đồng đóng góp. Người đóng góp (contributor) nhận một
-key. Key đó kích hoạt được tối đa ba máy của chính họ, và các máy này được
-route qua đội relay.
+GameNoLag đặt đường đó ngay dưới game của bạn. Nó cho **chỉ lưu lượng của game**
+đi qua một relay WireGuard gần máy chủ game. Relay được chọn bằng cách đo chính
+kết nối của bạn, và GameNoLag rút ra ngay khi có sự cố. Các relay là VPS do
+cộng đồng đóng góp.
 
-> **Trạng thái: giai đoạn đầu.** Mọi thành phần dưới đây đều đã có và đã được
-> kiểm thử. Client Windows đã qua CI trên Windows nhưng chưa được người chơi nào
-> chạy thật; checklist thủ công trong
-> [runbook của client](docs/windows-client-runbook.md#the-window) (tiếng Anh)
-> là điều kiện phải qua trước khi điều đó xảy ra.
+> **Trạng thái: giai đoạn đầu, chưa tới tay người chơi.** Mọi thành phần đã
+> được build và test trong CI, trên Linux và Windows, với kernel và database
+> thật. Client Windows chưa được người chơi nào chạy thử; trước đó cần làm
+> [checklist chạy tay trên Windows](docs/windows-client-runbook.md#the-window)
+> (tiếng Anh).
+
+## Khác biệt ở đâu
+
+- **Chỉ game đi qua.** Đây không phải VPN. Route tới máy chủ của một game chỉ
+  được cài khi game đó đang chạy, và bị gỡ khi game thoát. Trình duyệt, Discord
+  và tải file không bao giờ rời khỏi kết nối bình thường của bạn.
+- **Đường của bạn quyết định.** Mỗi relay ứng viên được đo bằng một lần
+  handshake WireGuard thật từ máy bạn, relay nhanh nhất được chọn. GameNoLag
+  không đổi relay giữa trận chỉ vì nhanh hơn một chút.
+- **Không đụng vào game.** Game được nhận ra bằng tên tiến trình, giống cách
+  Task Manager liệt kê. Không có gì mở, đọc hay chèn vào tiến trình game.
+- **Lỗi thì an toàn.** Relay chết thì client chuyển sang relay khác. Không
+  relay nào phản hồi thì client gỡ route, và game của bạn tiếp tục chạy qua nhà
+  mạng. Dừng service hoặc khởi động lại máy thì không còn sót lại gì.
+- **Relay không bị lạm dụng.** Relay chỉ chuyển tiếp tới các dải địa chỉ game
+  đã công bố, có giới hạn tốc độ cho từng người chơi. Relay được kiểm tra từ bên
+  ngoài trước khi đưa vào dùng. Khi một contributor bị thu hồi key, họ bị loại
+  khỏi mạng trong vòng một lần sync.
 
 ## Cách hoạt động
 
 ```
- Player's PC (Windows)                     Contributed VPS                Game servers
-┌─────────────────────────────┐          ┌──────────────────┐        ┌──────────────┐
-│ gnl-ui  (tray + window,     │          │ WireGuard (wg0)  │        │ AWS / Azure  │
-│          no privilege)      │          │ gnl-agent        │        │ Singapore,   │
-│    │ named pipe, 4 verbs    │  UDP     │  - peers         │        │ Tokyo        │
-│    ▼                        │ ═══════► │  - egress        │ ─────► │              │
-│ gnl-service (LocalSystem)   │ WireGuard│    allowlist     │        │              │
-│  - measures every relay     │          │  - rate limit    │        │              │
-│  - routes only game ranges  │          └────────┬─────────┘        └──────────────┘
-└────────────┬────────────────┘                   │ sync every 10 s
-             │ HTTPS: session, profile            │
-             ▼                                    ▼
-        ┌──────────────────────────────────────────────┐
-        │ gnl-control + Postgres                       │
-        │ keys, devices, relays, published game ranges │
-        └──────────────────────────────────────────────┘
+  Your PC (Windows)                 Relay (community VPS)           Game server
+ ┌────────────────────┐  WireGuard  ┌──────────────────────┐        ┌───────────┐
+ │ game traffic only  │ ══════════► │ game ranges only,    │ ─────► │ Singapore │
+ │ fastest relay wins │             │ rate-capped          │        │ Tokyo     │
+ └─────────┬──────────┘             └──────────┬───────────┘        └───────────┘
+           │ HTTPS                             │ sync every 10 s
+           ▼                                   ▼
+       ┌──────────────────────────────────────────────────┐
+       │ Control plane: keys, devices, relays, game ranges │
+       └──────────────────────────────────────────────────┘
 ```
 
-- **Client đo, control plane lọc.** Control plane đưa ra danh sách các relay
-  đang up và đáng tin. Client handshake với từng relay qua chính đường mạng
-  của người chơi rồi chọn relay nhanh nhất. Control plane không thể xếp hạng
-  relay, vì nó không nhìn thấy đường mạng của bất kỳ người chơi nào.
-- **Dải địa chỉ game hẹp và được đối chiếu chéo.** Một địa chỉ chỉ vào được
-  profile đã công bố sau khi ba contributor độc lập cùng thấy nó, và chỉ khi nó
-  nằm trong một dải mà AWS, Azure hoặc ASN của game công bố. Route được cài khi
-  game chạy và gỡ khi game thoát.
-- **Khi có lỗi, quay về đường bình thường.** Nếu relay ngừng phản hồi, client
-  chuyển sang relay khác. Nếu không relay nào phản hồi, client gỡ route của
-  mình. Adapter tunnel và mọi route biến mất khi service dừng. Khởi động lại máy
-  là máy trở về nguyên trạng hoàn toàn.
+Control plane quyết định ai được dùng relay nào và công bố các dải địa chỉ của
+game. Nó không bao giờ nằm trên đường đi của gói tin. Dải địa chỉ game được giữ
+hẹp: một địa chỉ chỉ được thêm khi ba contributor độc lập đã thấy nó, và chỉ khi
+nó nằm trong một dải mà AWS, Azure hoặc mạng của chính game công bố.
 
-## Thành phần
+Chi tiết hơn: [Kiến trúc](docs/vi/architecture.md).
 
-| Lệnh | Chạy trên | Làm gì |
+## Bắt đầu
+
+| Tôi muốn… | Bắt đầu từ |
+|---|---|
+| **Chơi game** với ping thấp và ổn định hơn | [Hướng dẫn sử dụng](docs/vi/user-guide.md) |
+| **Đóng góp một VPS** làm relay | [Cài đặt relay](docs/vi/setup-relay.md) |
+| **Vận hành một hệ thống** cho cộng đồng | [Cài đặt control plane](docs/vi/setup-control-plane.md), rồi làm theo [thứ tự dựng hệ thống](docs/vi/README.md) |
+| **Cài hoặc đóng gói** client Windows | [Cài đặt client](docs/vi/setup-client.md) |
+| **Phát triển** | [Phát triển](#phát-triển) và [CONTRIBUTING](CONTRIBUTING.md) (tiếng Anh) |
+
+Người chơi cần một contributor key từ người vận hành hệ thống. Ở giai đoạn này,
+key được cấp cho người đóng góp relay, và mỗi key dùng được trên tối đa ba máy
+của chính họ.
+
+## Gồm những gì
+
+| Binary | Chạy trên | Vai trò |
 |---|---|---|
-| `gnl-service` | Windows, LocalSystem | Giữ tunnel. Lấy session và profile, đo các relay, cài và gỡ route. |
-| `gnl-ui` | Windows, dưới quyền người dùng | Icon ở tray, panel mini và cửa sổ đầy đủ. Chỉ yêu cầu service một trong các lệnh `connect`, `disconnect`, `status`, `reload-profile`, ngoài ra không gì khác. |
-| `gnl-control` | Linux | Control plane: contributor key, slot thiết bị, đăng ký và đồng bộ relay, game profile. Đồng thời tạo key (`-mint-key`). |
-| `gnl-agent` | Relay Linux | Đồng bộ WireGuard peer, egress allowlist (ipset) và firewall theo control plane. |
-| `gnl-relaycheck` | Bất kỳ đâu bên ngoài relay | Chứng minh cổng UDP của relay truy cập được từ Internet, và báo kết quả cho control plane. |
-| `gnl-profile` | Người vận hành | Dựng danh sách CIDR của một game từ các địa chỉ quan sát được và các dải đã công bố. Chỉ chạy thử (dry-run) trừ khi có `-publish`. |
-| `gnl-probe`, `gnl-analyze` | Máy đo | Chiến dịch đo chất lượng route P0: vào giờ cao điểm, đường qua VPS có tốt hơn đường của nhà mạng không? |
-
-## Cấu trúc repository
-
-```
-cmd/            one directory per binary above
-internal/
-  api/          request and response types shared by client, relay and control plane
-  control/      HTTP server, Postgres store, schema, rate limits
-  agent/        relay firewall rules and the sync loop
-  ipsetsync/    atomic ipset swaps for the egress allowlist
-  wgsync/       WireGuard peer reconciliation
-  profile/      turning observations and published ranges into a narrow profile
-  probe/, analyze/, stats/   the P0 measurement campaign
-  client/       the Windows client: ipc, routes, wintun, winpipe, gamewatch, pick, …
-deploy/         relay installer, Windows install/uninstall, verification scripts
-docs/           runbooks and guides (see below)
-```
+| `gnl-service` | Windows, dạng service | Giữ tunnel, đo relay, định tuyến cho game đang chạy |
+| `gnl-ui` | Windows, dưới quyền người dùng | Icon khay hệ thống, panel mini và cửa sổ đầy đủ. Không có đặc quyền |
+| `gnl-control` | Linux | Control plane: key, slot thiết bị, relay, profile game |
+| `gnl-agent` | Mỗi relay | Đồng bộ peer WireGuard, allowlist đầu ra và firewall |
+| `gnl-relaycheck` | Bên ngoài relay | Chứng minh relay truy cập được từ Internet |
+| `gnl-profile` | Người vận hành | Dựng danh sách địa chỉ của một game từ observation và các dải đã công bố |
+| `gnl-probe`, `gnl-analyze` | Máy đo | Đo xem đường qua VPS có tốt hơn nhà mạng vào giờ cao điểm không |
 
 ## Phát triển
 
-Cần Go 1.25 trở lên. Phần lớn code build và test được trên mọi hệ điều hành.
-Các phần chỉ dành cho Windows nằm sau build tag, còn phần logic ra quyết định
-của chúng được đặt trong các file không phụ thuộc nền tảng nên được test ở mọi
-nơi.
+Cần Go 1.25 trở lên. Test với kernel và database cần Docker.
 
 ```bash
-go test ./...                       # everything that runs anywhere
-GOOS=windows go vet ./...           # the Windows client, from any OS
-./deploy/verify-firewall-in-docker.sh   # iptables/ipset against a real kernel (needs Docker)
+go test ./...                               # runs anywhere
+GOOS=windows go vet ./...                   # the Windows client, from any OS
+./deploy/verify-firewall-in-docker.sh       # relay firewall against a real kernel
+GNL_TEST_DSN=postgres://… go test ./internal/control/   # control-plane store against Postgres
 ```
 
-Các test firewall thay đổi firewall của máy. Chúng nằm sau build tag
-`linuxroot` và `GNL_FIREWALL_TESTS=1`, nên `go test ./...` không bao giờ đụng
-tới iptables. Script trên chạy chúng trong một container đặc quyền dùng xong
-bỏ.
+Code chỉ dành cho Windows nằm sau build tag, còn phần quyết định của nó nằm
+trong các file không phụ thuộc nền tảng, nên gần như mọi thứ test được trên bất
+kỳ máy nào. CI chạy tất cả các lệnh trên ở mỗi lần push và mỗi pull request, và
+build sẵn binary Linux cùng gói cài Windows để tải về.
 
-### Build
+Lệnh build, quy ước và những ranh giới không được nới lỏng nằm trong
+[CONTRIBUTING.md](CONTRIBUTING.md) (tiếng Anh).
 
-```bash
-# Windows client
-GOOS=windows GOARCH=amd64 go build -o gnl-service.exe ./cmd/gnl-service
-GOOS=windows GOARCH=amd64 go build -ldflags -H=windowsgui -o gnl-ui.exe ./cmd/gnl-ui
+## Bảo mật
 
-# relay and control plane
-GOOS=linux GOARCH=amd64 go build -o gnl-agent ./cmd/gnl-agent
-GOOS=linux GOARCH=amd64 go build -o gnl-control ./cmd/gnl-control
-```
+Client chỉ có một ranh giới đặc quyền. Tray nói chuyện với service qua một
+named pipe chỉ nhận bốn lệnh không tham số, và chỉ từ người dùng đang đăng
+nhập. Key và token chỉ được lưu dưới dạng hash. Relay loại bỏ mọi thứ không đi
+tới một dải địa chỉ game.
 
-`gnl-ui.exe` phải được phát hành kèm `deploy/windows/gnl-ui.exe.manifest` đặt
-ngay cạnh nó. Thiếu manifest thì menu ở tray không được tạo.
-
-### CI
-
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) (tiếng Anh) chạy mỗi lần
-push lên `main` và với mọi pull request:
-
-1. `gofmt`, `go vet` và `go test` trên Ubuntu và trên Windows. Trên Ubuntu, nó
-   còn vet bản build Windows.
-2. Các test firewall trên kernel thật.
-3. Khi cả hai bước trên đều qua, nó build các binary Linux và gói client
-   Windows (cả hai file thực thi, manifest và các script cài đặt). Cả hai đều
-   tải được từ artifact của lần chạy.
-
-### Quy ước
-
-- Commit theo Conventional Commits (`feat(client): …`, `fix(relay): …`), kèm
-  phần thân giải thích lý do.
-- Logic có ra quyết định thì phải có test. Code chỉ gọi xuống hệ điều hành được
-  giữ thật mỏng, để phần không được test càng ít càng tốt.
-- Comment giải thích tại sao, không giải thích cái gì.
-
-## Mô hình bảo mật, tóm tắt
-
-- **Một ranh giới đặc quyền duy nhất trên client.** UI chạy không có đặc quyền
-  và chỉ được yêu cầu service bốn lệnh không tham số. Nó không thể chỉ định một
-  relay, một route, một file hay một lệnh. Named pipe chỉ nhận người dùng đang
-  đăng nhập tương tác.
-- **Bí mật được lưu dưới dạng hash.** Contributor key và relay token chỉ được
-  lưu dưới dạng hash. Private key của thiết bị nằm trong
-  `C:\ProgramData\GameNoLag`, chỉ SYSTEM và Administrators đọc được.
-- **Relay không phải open proxy.** Chính sách FORWARD là DROP. Egress bị giới
-  hạn trong các dải địa chỉ game đã công bố, và mỗi session bị giới hạn 64 KB/s
-  mỗi chiều. Relay mới không mang lưu lượng nào cho tới khi khả năng truy cập
-  của nó được chứng minh từ bên ngoài và thời gian theo dõi của nó đã qua.
-- **Không bao giờ đụng vào game.** Game được nhận diện bằng tên tiến trình,
-  giống cách Task Manager làm. Client không bao giờ mở handle vào game, đọc bộ
-  nhớ của game hay inject bất cứ thứ gì.
-- **Profile cần bằng chứng.** Dữ liệu quan sát chỉ ghi địa chỉ đích, và một
-  contributor không thể một mình đưa một địa chỉ vào profile.
+Danh sách đầy đủ nằm trong [Kiến trúc](docs/vi/architecture.md). Báo lỗ hổng
+một cách riêng tư theo hướng dẫn trong [SECURITY.md](SECURITY.md) (tiếng Anh).
 
 ## Tài liệu
 
-Tài liệu đầy đủ có bằng [English](docs/en/README.md),
-[Tiếng Việt](docs/vi/README.md) và [简体中文](docs/zh-CN/README.md).
+Hướng dẫn bằng [English](docs/en/README.md), [Tiếng Việt](docs/vi/README.md) và
+[简体中文](docs/zh-CN/README.md): hướng dẫn sử dụng, cài client, relay và control
+plane, kiến trúc.
 
-| Hướng dẫn | Dành cho |
-|---|---|
-| [Hướng dẫn sử dụng](docs/vi/user-guide.md) | Người chơi: cài đặt, sử dụng, xử lý sự cố, gỡ cài đặt |
-| [Cài đặt client](docs/vi/setup-client.md) | Cài đặt, cấu hình và đóng gói client Windows |
-| [Cài đặt relay](docs/vi/setup-relay.md) | Contributor chạy relay trên VPS |
-| [Cài đặt control plane](docs/vi/setup-control-plane.md) | Người vận hành: Postgres, TLS, key, xác minh relay, game profile |
-| [Kiến trúc](docs/vi/architecture.md) | Các phần ghép với nhau thế nào, API, vòng đời relay, ranh giới bảo mật |
-
-Tài liệu tham khảo chuyên sâu (tiếng Anh):
-[runbook client Windows](docs/windows-client-runbook.md),
-[runbook P1](docs/p1-runbook.md) và [runbook P0](docs/p0-runbook.md).
+Runbook chuyên sâu (tiếng Anh):
+- [client Windows](docs/windows-client-runbook.md)
+- [control plane và relay đầu tiên](docs/p1-runbook.md)
+- [đo chất lượng đường đi](docs/p0-runbook.md)
 
 ## Đóng góp
 
-Mọi đóng góp đều được hoan nghênh. Hãy đọc [CONTRIBUTING.md](CONTRIBUTING.md)
-(tiếng Anh) trước, và báo cáo lỗ hổng bảo mật một cách riêng tư theo hướng dẫn
-trong [SECURITY.md](SECURITY.md) (tiếng Anh), không mở issue công khai. Mọi
-người tham gia đều tuân theo
-[Bộ quy tắc ứng xử](CODE_OF_CONDUCT.md) (tiếng Anh).
+Hoan nghênh issue và pull request. Vui lòng đọc
+[CONTRIBUTING.md](CONTRIBUTING.md) (tiếng Anh) trước. Mọi người tham gia đều
+tuân theo [Quy tắc ứng xử](CODE_OF_CONDUCT.md) (tiếng Anh).
 
 ## Giấy phép
 
-[Apache License 2.0](LICENSE) (tiếng Anh).
+[Apache License 2.0](LICENSE).
