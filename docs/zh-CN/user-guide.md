@@ -12,27 +12,20 @@ GameNoLag 让你的游戏流量经由靠近游戏服务器（新加坡、东京�
 
 - Windows 10 或 11，64 位。
 - 安装时需要管理员权限。此后日常使用不需要。
-- 由运维者提供的**贡献者密钥**（contributor key，`GNL-XXXX-XXXX-XXXX`），在你贡献一台 VPS 时发放。
+- 由运维者提供的**贡献者密钥**（contributor key，`GNL-XXXX-XXXX-XXXX-XXXX`），在你贡献一台 VPS 时发放。
   一个密钥最多可激活 **3 台电脑**。
 - **控制平面地址**（control plane，以 `https://` 开头），同样由运维者提供。
-- `gamenolag-windows-amd64` 安装包：`gnl-service.exe`、`gnl-ui.exe`、
-  `gnl-ui.exe.manifest`、`install.ps1`、`uninstall.ps1`。
 
 ## 安装
 
-1. 将安装包解压到一个文件夹，例如 `Downloads\gamenolag`。这五个文件要放在一起。
-2. 以**管理员身份打开 PowerShell**：点击“开始”，输入 `PowerShell`，右键单击，
-   然后选择*以管理员身份运行*（Run as administrator）。
-3. 运行：
+1. 从[最新版本](https://github.com/hashcott/NoLag/releases/latest)下载 **`GameNoLag-Setup-<version>.exe`**。
+2. 双击运行。Windows 会请求管理员权限，请允许。在安装程序完成代码签名之前，
+   Windows SmartScreen 可能会提示 *Windows protected your PC*（Windows 已保护你的电脑）。
+   点击 **More info → Run anyway**（更多信息 → 仍要运行），但仅限于从上面的版本页面下载的文件。
+3. 接受许可协议，然后输入你的**贡献者密钥**和**控制平面地址**。地址可能已经预先填好。
+4. 保持勾选 **Start GameNoLag**，完成安装。图标会出现在通知区域，此后每次登录时它都会自动启动。
 
-   ```powershell
-   cd $HOME\Downloads\gamenolag
-   Unblock-File .\*.ps1, .\*.exe
-   .\install.ps1 -ContributorKey GNL-XXXX-XXXX-XXXX -ControlUrl https://cp.example.com
-   ```
-
-   将密钥和地址替换为你自己的。之所以需要 `Unblock-File`，是因为 Windows 会阻止下载的脚本。
-4. 从开始菜单启动 **GameNoLag**，或注销后重新登录。此后每次登录时它都会自动启动。
+升级方法相同：在旧版本上运行更新的安装程序。你的电脑会保留其身份，因此不会额外占用设备名额。
 
 ## 日常使用
 
@@ -104,7 +97,7 @@ GameNoLag **仅通过进程名**识别游戏，与任务管理器中显示的名
 |---|---|---|
 | *The GameNoLag service is not running* | 服务已停止 | 管理员 PowerShell：`Start-Service GameNoLag` |
 | 点击 Connect 后出现 *no relay answered* | 你的网络阻断了 UDP（在办公室或咖啡馆网络中很常见） | 换一个网络试试。你的游戏仍可在普通网络路径上正常运行 |
-| *no device slots left* | 该密钥已绑定 3 台电脑 | 在不再使用的电脑上用 `-Purge` 卸载，或联系运维者 |
+| *no device slots left* | 该密钥已绑定 3 台电脑 | 在不再使用的电脑上移除其身份（见“卸载”），或联系运维者 |
 | 红色图标带横杠 | 已连接但出现故障 | 在完整窗口中查看错误信息。通常会自动恢复；若没有恢复，先 Disconnect 再 Connect |
 | *Open log folder*：Access denied | 该文件夹存放着你的私钥，因此只有管理员可以读取 | 属于正常现象。日志位于 `C:\ProgramData\GameNoLag\service.log`；请以管理员身份运行记事本来打开它 |
 | 完全无法上网，且你怀疑与 GameNoLag 有关 | — | `Stop-Service GameNoLag`，或重启。服务一旦停止，GameNoLag 的所有路由都会消失 |
@@ -113,15 +106,16 @@ GameNoLag **仅通过进程名**识别游戏，与任务管理器中显示的名
 
 ## 卸载
 
-在管理员 PowerShell 中，进入 `uninstall.ps1` 所在的文件夹：
+**Settings → Apps → Installed apps → GameNoLag → Uninstall**（设置 → 应用 → 已安装的应用 → GameNoLag → 卸载）。
+这会移除程序，并保留这台电脑的身份，因此之后重新安装不会额外占用设备名额。
+
+如果还想释放名额（例如你要把这台电脑送人），请同时移除身份。在管理员 PowerShell 中：
 
 ```powershell
-.\uninstall.ps1          # removes the program, keeps this PC's identity
-.\uninstall.ps1 -Purge   # also removes the identity
+Remove-Item -Recurse -Force "$env:ProgramData\GameNoLag"
 ```
 
-不带 `-Purge` 时，之后重新安装仍被视为同一台电脑，不会额外占用名额。
-带上它时，下次安装会被视为一台新电脑，并占用另一个名额。
+之后的下一次安装会被视为一台新电脑。运维者也可以帮你释放名额。
 
 ## 隐私
 

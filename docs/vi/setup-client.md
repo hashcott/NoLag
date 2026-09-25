@@ -21,9 +21,43 @@ xem [hướng dẫn sử dụng](user-guide.md).
 - Quyền Administrator để cài. Dùng hằng ngày thì không cần.
 - Một contributor key và URL của control plane, do người vận hành cung cấp.
 
-## 1. Lấy gói cài
+## 1. Cài bằng setup wizard
 
-Artifact CI `gamenolag-windows-amd64` chứa mọi thứ, đặt cạnh nhau:
+Mỗi bản release đều kèm **`GameNoLag-Setup-<version>.exe`**
+([releases](https://github.com/hashcott/NoLag/releases/latest)). Wizard hỏi
+contributor key và địa chỉ control plane, cài đặt, rồi mở tray cho chính người
+đã chạy nó. Muốn nâng cấp, chỉ cần chạy bản setup mới hơn đè lên bản cũ. Gỡ cài
+đặt qua **Settings → Apps → GameNoLag → Uninstall**.
+
+Khi cần cài cho nhiều máy, hãy chạy ở chế độ im lặng (silent):
+
+```powershell
+GameNoLag-Setup-1.2.3.exe /VERYSILENT /SUPPRESSMSGBOXES /KEY=GNL-XXXX-XXXX-XXXX-XXXX /URL=https://cp.example.com
+```
+
+Exit code `0` nghĩa là đã cài xong. Mọi giá trị khác nghĩa là chưa cài được: key
+không hợp lệ, địa chỉ không phải `https`, hoặc `install.ps1` bị lỗi. Thêm
+`/LOG=setup.log` để xem chi tiết.
+
+Wizard chỉ là một lớp vỏ mỏng bọc quanh `install.ps1`. Nó kiểm tra key và địa
+chỉ theo một bảng ký tự hẹp, rồi chạy script với hai giá trị đó, nên cả hai cách
+cài đều để lại máy ở đúng cùng một trạng thái. Với mỗi lần push, CI build wizard,
+cài nó trên một Windows runner, truy vấn service qua pipe của nó, rồi gỡ cài đặt
+lại.
+
+Để tự build wizard, bạn cần [Inno Setup 6](https://jrsoftware.org/isinfo.php):
+
+```powershell
+iscc /DAppVersion=1.2.3 /DPayloadDir=C:\path\to\bundle /DDefaultControlUrl=https://cp.example.com deploy\windows\gamenolag.iss
+```
+
+`DefaultControlUrl` điền sẵn ô địa chỉ, nên người chơi chỉ cần dán key của mình.
+Trong CI, giá trị này lấy từ biến repository `GNL_CONTROL_URL`.
+
+## 2. Cài từ gói cài, bằng script
+
+File `gamenolag-windows-amd64-<version>.zip` của bản release, hoặc artifact CI
+cùng tên, chứa năm file đặt cạnh nhau:
 
 | File | Là gì |
 |---|---|
@@ -32,7 +66,7 @@ Artifact CI `gamenolag-windows-amd64` chứa mọi thứ, đặt cạnh nhau:
 | `gnl-ui.exe.manifest` | **Phải luôn nằm cạnh `gnl-ui.exe`.** Thiếu nó thì menu ở tray không được tạo và icon bị mờ trên màn hình high-DPI |
 | `install.ps1`, `uninstall.ps1` | Trình cài đặt và trình gỡ cài đặt |
 
-Để tự build trên bất kỳ hệ điều hành nào:
+Để tự build gói cài trên bất kỳ hệ điều hành nào:
 
 ```bash
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -o dist/gnl-service.exe ./cmd/gnl-service
@@ -40,21 +74,18 @@ GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags -H=windowsgu
 cp deploy/windows/gnl-ui.exe.manifest deploy/windows/*.ps1 dist/
 ```
 
-## 2. Cài đặt
-
 Trong một cửa sổ PowerShell **chạy quyền administrator**, tại thư mục chứa gói
 cài:
 
 ```powershell
 Unblock-File .\*.ps1, .\*.exe
-.\install.ps1 -ContributorKey GNL-XXXX-XXXX-XXXX -ControlUrl https://cp.example.com
+.\install.ps1 -ContributorKey GNL-XXXX-XXXX-XXXX-XXXX -ControlUrl https://cp.example.com
 ```
 
 `Unblock-File` gỡ dấu "tải từ Internet". Thiếu bước này, PowerShell từ chối
-chạy script chưa ký được tải về. Installer từ chối URL control không phải
-`https`, vì key được gửi đi dưới dạng bearer token.
+chạy script chưa ký được tải về.
 
-Những gì nó làm:
+### Cả hai cách đều làm gì
 
 | Ở đâu | Cái gì |
 |---|---|
@@ -63,10 +94,11 @@ Những gì nó làm:
 | Service `GameNoLag` | Được đăng ký để tự khởi động. Tunnel không bật cho tới khi UI yêu cầu connect |
 | Start Menu, lúc đăng nhập | Một shortcut *GameNoLag*, và tray được đặt để tự chạy mỗi lần đăng nhập |
 
-Installer **không** mở tray. Nó chạy với quyền nâng cao, nên bất cứ thứ gì nó
-khởi chạy cũng sẽ chạy với quyền nâng cao và nằm trong session của
-administrator. Hãy mở *GameNoLag* từ Start Menu, hoặc đăng xuất rồi đăng nhập
-lại.
+Cả hai đều từ chối URL control không phải `https`, vì key được gửi đi dưới dạng
+bearer token. Service và tray đang chạy sẽ được dừng trước khi file của chúng bị
+thay. Riêng `install.ps1` thì **không** mở tray: nó chạy với quyền nâng cao, và
+tray sẽ nằm trong session của administrator. Wizard thì mở tray dưới người dùng
+ban đầu, không có quyền nâng cao.
 
 ## 3. Cấu hình
 
@@ -75,7 +107,7 @@ lại.
 ```json
 {
   "control_url": "https://cp.example.com",
-  "contributor_key": "GNL-XXXX-XXXX-XXXX",
+  "contributor_key": "GNL-XXXX-XXXX-XXXX-XXXX",
   "games": [
     { "id": "pubg", "process_names": ["TslGame.exe"] }
   ]
@@ -136,6 +168,12 @@ psexec -s -i "C:\Program Files\GameNoLag\gnl-service.exe"
 ```
 
 ## 6. Gỡ cài đặt
+
+Nếu cài bằng wizard: **Settings → Apps → GameNoLag → Uninstall**, hoặc
+`"C:\Program Files\GameNoLag\unins000.exe" /VERYSILENT` từ một script. Lệnh này
+chạy `uninstall.ps1` và giữ lại danh tính của máy này.
+
+Nếu cài bằng script, trong một PowerShell administrator:
 
 ```powershell
 .\uninstall.ps1          # keeps this machine's identity and its device slot

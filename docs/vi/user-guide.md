@@ -15,31 +15,27 @@ Tài liệu này dành cho người chơi. Về cài đặt và đóng gói, xem
 - Windows 10 hoặc 11, bản 64-bit.
 - Quyền quản trị (Administrator) để cài. Sau đó, dùng hằng ngày không cần quyền
   này.
-- Một **contributor key** (`GNL-XXXX-XXXX-XXXX`) do người vận hành cấp khi bạn
+- Một **contributor key** (`GNL-XXXX-XXXX-XXXX-XXXX`) do người vận hành cấp khi bạn
   đóng góp một VPS. Một key kích hoạt được tối đa **3 PC**.
 - **Địa chỉ control plane** (máy chủ điều khiển, bắt đầu bằng `https://`), cũng
   do người vận hành cung cấp.
-- Gói cài `gamenolag-windows-amd64`: `gnl-service.exe`, `gnl-ui.exe`,
-  `gnl-ui.exe.manifest`, `install.ps1`, `uninstall.ps1`.
 
 ## Cài đặt
 
-1. Giải nén gói cài vào một thư mục, ví dụ `Downloads\gamenolag`. Giữ nguyên 5
-   file cạnh nhau.
-2. Mở **PowerShell bằng quyền Administrator**: bấm Start, gõ `PowerShell`, bấm
-   chuột phải rồi chọn *Run as administrator*.
-3. Chạy:
+1. Tải **`GameNoLag-Setup-<version>.exe`** từ
+   [bản release mới nhất](https://github.com/hashcott/NoLag/releases/latest).
+2. Bấm đúp vào file. Windows hỏi quyền administrator; hãy cho phép.
+   Chừng nào trình cài đặt chưa được ký số (code-signed), Windows SmartScreen có
+   thể báo *Windows protected your PC* (Windows đã bảo vệ PC của bạn). Bấm
+   **More info → Run anyway** (Thông tin thêm → Vẫn chạy), nhưng chỉ với file
+   bạn tải từ trang release ở trên.
+3. Đồng ý với giấy phép, rồi nhập **contributor key** và **địa chỉ control
+   plane**. Ô địa chỉ có thể đã được điền sẵn.
+4. Bấm hoàn tất khi ô **Start GameNoLag** đang được đánh dấu. Icon xuất hiện ở
+   vùng thông báo, và từ đó trở đi nó tự chạy mỗi khi bạn đăng nhập.
 
-   ```powershell
-   cd $HOME\Downloads\gamenolag
-   Unblock-File .\*.ps1, .\*.exe
-   .\install.ps1 -ContributorKey GNL-XXXX-XXXX-XXXX -ControlUrl https://cp.example.com
-   ```
-
-   Thay key và địa chỉ bằng giá trị của bạn. Cần `Unblock-File` vì Windows chặn
-   các script tải về từ Internet.
-4. Mở **GameNoLag** từ Start Menu, hoặc đăng xuất rồi đăng nhập lại. Từ đó trở
-   đi, nó tự chạy mỗi khi bạn đăng nhập.
+Nâng cấp cũng làm y như vậy: chạy bản setup mới hơn đè lên bản cũ. PC của bạn
+giữ nguyên danh tính, nên không tốn thêm slot thiết bị.
 
 ## Sử dụng hằng ngày
 
@@ -121,7 +117,7 @@ mỗi 30 giây.
 |---|---|---|
 | *The GameNoLag service is not running* | Service đã dừng | Mở PowerShell Administrator, chạy `Start-Service GameNoLag` |
 | *no relay answered* sau khi bấm Connect | Mạng của bạn chặn UDP (thường gặp ở mạng công ty hoặc quán cà phê) | Thử mạng khác. Game vẫn chạy bình thường theo đường mạng thường |
-| *no device slots left* (hết slot thiết bị) | Key đã dùng cho đủ 3 PC | Gỡ cài đặt kèm `-Purge` trên một PC không dùng nữa, hoặc nhờ người vận hành |
+| *no device slots left* (hết slot thiết bị) | Key đã dùng cho đủ 3 PC | Xoá danh tính trên một PC không dùng nữa (xem mục Gỡ cài đặt), hoặc nhờ người vận hành |
 | Icon đỏ có thanh ngang | Đã kết nối nhưng có lỗi | Đọc dòng lỗi trong cửa sổ đầy đủ. Thường sẽ tự hồi phục; nếu không, bấm Disconnect rồi Connect |
 | *Open log folder* báo Access denied | Thư mục chứa private key (khoá riêng) của bạn, nên chỉ quản trị viên đọc được | Bình thường. Log nằm ở `C:\ProgramData\GameNoLag\service.log`; mở bằng Notepad chạy quyền Administrator |
 | Mất Internet hoàn toàn và nghi do GameNoLag | — | `Stop-Service GameNoLag`, hoặc khởi động lại máy. Mọi route của GameNoLag biến mất ngay khi service dừng |
@@ -131,16 +127,20 @@ xảy ra.
 
 ## Gỡ cài đặt
 
-Mở PowerShell Administrator trong thư mục chứa `uninstall.ps1`:
+**Settings → Apps → Installed apps → GameNoLag → Uninstall** (Cài đặt → Ứng
+dụng → Ứng dụng đã cài → GameNoLag → Gỡ cài đặt). Thao tác này gỡ chương trình
+và giữ lại danh tính của PC này, nên lần cài lại sau không tốn thêm slot thiết
+bị.
+
+Muốn giải phóng luôn slot, chẳng hạn vì bạn định cho người khác chiếc PC này,
+hãy xoá cả danh tính. Trong một PowerShell Administrator:
 
 ```powershell
-.\uninstall.ps1          # removes the program, keeps this PC's identity
-.\uninstall.ps1 -Purge   # also removes the identity
+Remove-Item -Recurse -Force "$env:ProgramData\GameNoLag"
 ```
 
-Không có `-Purge`, lần cài lại sau vẫn được tính là cùng một PC và không tốn
-thêm slot. Có `-Purge`, lần cài tiếp theo được tính là một PC mới và tốn thêm
-một slot.
+Khi đó, lần cài tiếp theo được tính là một PC mới. Người vận hành cũng có thể
+giải phóng slot giúp bạn.
 
 ## Quyền riêng tư
 

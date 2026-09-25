@@ -18,9 +18,38 @@ UI 通过命名管道向服务请求四个动词（verb）之一，别无其他�
 - 安装需要管理员权限。日常使用不需要。
 - 由运维者提供的贡献者密钥（key）和控制平面（control plane）URL。
 
-## 1. 获取安装包
+## 1. 使用安装向导安装
 
-CI 构件 `gamenolag-windows-amd64` 包含所需的全部文件，放在同一目录下：
+每个版本都附带 **`GameNoLag-Setup-<version>.exe`**
+（[releases](https://github.com/hashcott/NoLag/releases/latest)）。它会询问贡献者密钥和控制平面地址，
+完成安装，并为运行它的用户启动托盘。升级时，只需在旧版本上运行更新的安装程序。
+卸载请使用 **Settings → Apps → GameNoLag → Uninstall**（设置 → 应用 → GameNoLag → 卸载）。
+
+需要在多台机器上安装时，可以静默运行：
+
+```powershell
+GameNoLag-Setup-1.2.3.exe /VERYSILENT /SUPPRESSMSGBOXES /KEY=GNL-XXXX-XXXX-XXXX-XXXX /URL=https://cp.example.com
+```
+
+退出码 `0` 表示安装成功。其他任何值都表示未安装：密钥无效、地址不是 `https`，
+或 `install.ps1` 执行失败。添加 `/LOG=setup.log` 可查看详细信息。
+
+安装向导只是 `install.ps1` 外面的一层薄壳。它按一个严格限定的字符集检查密钥和地址，
+然后用这两个值运行脚本，因此两种安装方式会让机器处于完全相同的状态。
+CI 在每次推送时都会构建安装向导，在 Windows runner 上安装它，通过管道查询服务，然后再将其卸载。
+
+如需自行构建安装向导，需要 [Inno Setup 6](https://jrsoftware.org/isinfo.php)：
+
+```powershell
+iscc /DAppVersion=1.2.3 /DPayloadDir=C:\path\to\bundle /DDefaultControlUrl=https://cp.example.com deploy\windows\gamenolag.iss
+```
+
+`DefaultControlUrl` 会预先填好地址栏，玩家只需粘贴自己的密钥。
+在 CI 中，它取自仓库变量 `GNL_CONTROL_URL`。
+
+## 2. 通过脚本从安装包安装
+
+版本附带的 `gamenolag-windows-amd64-<version>.zip`，或同名的 CI 构件，包含并排放置的五个文件：
 
 | 文件 | 说明 |
 |---|---|
@@ -29,7 +58,7 @@ CI 构件 `gamenolag-windows-amd64` 包含所需的全部文件，放在同一�
 | `gnl-ui.exe.manifest` | **必须与 `gnl-ui.exe` 放在一起。** 缺少它时，托盘菜单不会被创建，且图标在高 DPI 屏幕上会发虚 |
 | `install.ps1`、`uninstall.ps1` | 安装程序和卸载程序 |
 
-在任何操作系统上自行构建：
+在任何操作系统上自行构建安装包：
 
 ```bash
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -o dist/gnl-service.exe ./cmd/gnl-service
@@ -37,19 +66,16 @@ GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags -H=windowsgu
 cp deploy/windows/gnl-ui.exe.manifest deploy/windows/*.ps1 dist/
 ```
 
-## 2. 安装
-
 在**管理员** PowerShell 中，进入存放安装包的文件夹：
 
 ```powershell
 Unblock-File .\*.ps1, .\*.exe
-.\install.ps1 -ContributorKey GNL-XXXX-XXXX-XXXX -ControlUrl https://cp.example.com
+.\install.ps1 -ContributorKey GNL-XXXX-XXXX-XXXX-XXXX -ControlUrl https://cp.example.com
 ```
 
 `Unblock-File` 会去除“从互联网下载”的标记。没有这一步，PowerShell 会拒绝运行未签名的下载脚本。
-安装程序会拒绝非 `https` 的控制平面 URL，因为密钥以 bearer 令牌（token）的形式传输。
 
-它会做以下事情：
+### 两种方式都会做什么
 
 | 位置 | 内容 |
 |---|---|
@@ -58,8 +84,9 @@ Unblock-File .\*.ps1, .\*.exe
 | 服务 `GameNoLag` | 注册为自动启动。在 UI 请求连接之前，隧道不会启动 |
 | 开始菜单、登录 | 一个 *GameNoLag* 快捷方式，并设置托盘在每次登录时启动 |
 
-安装程序**不会**启动托盘。它以提升的权限运行，因此它启动的任何程序也会以提升的权限运行，
-并出现在管理员的会话中。请从开始菜单启动 *GameNoLag*，或注销后重新登录。
+两者都会拒绝非 `https` 的控制平面 URL，因为密钥以 bearer 令牌（token）的形式传输。
+正在运行的服务和托盘会在其文件被替换之前停止。单独运行 `install.ps1` **不会**启动托盘：
+它以提升的权限运行，托盘会出现在管理员的会话中。安装向导则改为以最初的、未提升权限的用户身份启动托盘。
 
 ## 3. 配置
 
@@ -68,7 +95,7 @@ Unblock-File .\*.ps1, .\*.exe
 ```json
 {
   "control_url": "https://cp.example.com",
-  "contributor_key": "GNL-XXXX-XXXX-XXXX",
+  "contributor_key": "GNL-XXXX-XXXX-XXXX-XXXX",
   "games": [
     { "id": "pubg", "process_names": ["TslGame.exe"] }
   ]
@@ -125,6 +152,11 @@ psexec -s -i "C:\Program Files\GameNoLag\gnl-service.exe"
 ```
 
 ## 6. 卸载
+
+使用安装向导安装的：**Settings → Apps → GameNoLag → Uninstall**，或在脚本中运行
+`"C:\Program Files\GameNoLag\unins000.exe" /VERYSILENT`。它会运行 `uninstall.ps1`，并保留本机的身份。
+
+通过脚本安装的，在管理员 PowerShell 中：
 
 ```powershell
 .\uninstall.ps1          # keeps this machine's identity and its device slot
