@@ -112,3 +112,21 @@ func TestConfigReadsGames(t *testing.T) {
 		t.Fatalf("games = %+v", c.Games)
 	}
 }
+
+func TestLoadConfigAcceptsAByteOrderMark(t *testing.T) {
+	// Windows PowerShell 5.1 writes Set-Content -Encoding UTF8 with a BOM, and so
+	// does Notepad's "UTF-8 with BOM". Refusing it left the service unable to
+	// start on every machine the installer had just set up.
+	path := filepath.Join(t.TempDir(), "config.json")
+	body := "\xEF\xBB\xBF" + `{"control_url":"https://cp.example.com","contributor_key":"GNL-TEST"}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if c.ControlURL != "https://cp.example.com" || c.ContributorKey != "GNL-TEST" {
+		t.Errorf("config = %+v", c)
+	}
+}

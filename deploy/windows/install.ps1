@@ -89,7 +89,11 @@ $config = [ordered]@{
   contributor_key = $ContributorKey
 }
 $configPath = Join-Path $dataDir 'config.json'
-$config | ConvertTo-Json | Set-Content -Path $configPath -Encoding UTF8
+# Without a byte order mark: Windows PowerShell's -Encoding UTF8 adds one, and
+# JSON does not allow it. The service tolerates it, but a file it has to forgive
+# is a file other tools will choke on.
+[System.IO.File]::WriteAllText($configPath, ($config | ConvertTo-Json),
+  (New-Object System.Text.UTF8Encoding $false))
 
 sc.exe create $serviceName binPath= "`"$binary`"" start= auto obj= LocalSystem DisplayName= "GameNoLag" | Out-Null
 sc.exe description $serviceName "Routes game traffic through a GameNoLag relay." | Out-Null

@@ -7,6 +7,7 @@
 package device
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -127,8 +128,12 @@ func LoadConfig(path string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("device: reading %s: %w; the installer writes this file", path, err)
 	}
+	// A UTF-8 byte order mark is what Windows PowerShell 5.1 and Notepad put at the
+	// front of a file they save as UTF-8. It is not JSON, but it is not an error in
+	// the configuration either.
+	raw = bytes.TrimPrefix(raw, []byte("\xEF\xBB\xBF"))
 	var c Config
-	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&c); err != nil {
 		return Config{}, fmt.Errorf("device: %s is not valid configuration: %w", path, err)
