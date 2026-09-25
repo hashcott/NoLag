@@ -74,7 +74,9 @@ if [[ $UNINSTALL -eq 1 ]]; then
   fi
 
   systemctl disable --now gnl-agent.service 2>/dev/null || true
-  rm -f /etc/systemd/system/gnl-agent.service
+  systemctl disable --now gnl-wg.service 2>/dev/null || true
+  rm -f /etc/systemd/system/gnl-agent.service /etc/systemd/system/gnl-wg.service
+  rm -f /usr/local/bin/gnl-wg-up
   systemctl daemon-reload 2>/dev/null || true
   ip link del "$IFACE" 2>/dev/null || true
 
@@ -242,12 +244,31 @@ sysctl -q --system
 
 # -------------------------------------------------------------- wireguard
 echo "==> WireGuard interface $IFACE"
+# The interface is brought up by a script rather than inline, because it has to
+# happen again on every boot. A WireGuard interface is not persistent: after a
+# reboot wg0, its address, its listen port and its key binding are all gone. The
+# old version set it up here only, so a rebooted relay came back dead - the agent
+# exited on the missing interface, systemd gave up after five restarts, and the
+# control plane went on reporting the relay as up. Nobody found out until a
+# player did.
+cat > /usr/local/bin/gnl-wg-up <<'WGUPEOF'
+#!/usr/bin/env bash
+# Bring up this relay's WireGuard interface from the state the installer
+# recorded. Idempotent: safe to run at every boot and by hand.
+set -euo pipefail
+[[ -r /etc/gnl/relay.state ]] || { echo "missing /etc/gnl/relay.state; re-run the installer" >&2; exit 1; }
+# shellcheck source=/dev/null
+. /etc/gnl/relay.state
+[[ -r /etc/gnl/relay.key ]] || { echo "missing /etc/gnl/relay.key; re-run the installer" >&2; exit 1; }
+
 ip link show "$IFACE" >/dev/null 2>&1 || ip link add "$IFACE" type wireguard
 wg set "$IFACE" listen-port "$PORT" private-key /etc/gnl/relay.key
 ip -4 addr show dev "$IFACE" | grep -q "${INNER_IP%%/*}" \
   || ip -4 addr add "$INNER_IP" dev "$IFACE"
 ip link set "$IFACE" up
-echo "    listening on UDP $PORT, address $INNER_IP"
+echo "$IFACE up: UDP $PORT, address $INNER_IP"
+WGUPEOF
+chmod 0755 /usr/local/bin/gnl-wg-up
 
 # --------------------------------------------------------------- firewall
 # Deny by default, then allow exactly the game CIDRs. An allowlist is fewer
@@ -283,6 +304,7 @@ INNER_SUBNET=$INNER_SUBNET
 WAN=$WAN
 PORT=$PORT
 IFACE=$IFACE
+INNER_IP=$INNER_IP
 SETNAME=$SETNAME
 PREV_FORWARD_POLICY=$PREV_FORWARD_POLICY
 STATEEOF
@@ -326,17 +348,46 @@ if [[ ! -f ./gnl-agent ]]; then
 fi
 install -m 0755 ./gnl-agent /usr/local/bin/gnl-agent
 
+# The interface is owned by its own oneshot unit so it is recreated at every
+# boot, before the agent starts. RemainAfterExit keeps it "active" once done, so
+# the agent's Requires= is satisfied for the life of the boot.
+cat > /etc/systemd/system/gnl-wg.service <<WGUNIT
+[Unit]
+Description=GameNoLag relay WireGuard interface
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/gnl-wg-up
+ExecStop=/sbin/ip link del $IFACE
+
+[Install]
+WantedBy=multi-user.target
+WGUNIT
+
 cat > /etc/systemd/system/gnl-agent.service <<UNIT
 [Unit]
 Description=GameNoLag relay agent
-After=network-online.target
+# The agent cannot do anything without the interface, and the interface does not
+# survive a reboot. Requires= makes a failure to create it fail the agent too,
+# instead of leaving the agent crash-looping against something that is never
+# coming back.
+Requires=gnl-wg.service
+After=gnl-wg.service network-online.target
 Wants=network-online.target
 
 [Service]
 ExecStart=/usr/local/bin/gnl-agent -control $CONTROL -iface $IFACE -ipset $SETNAME -state-file /etc/gnl/relay.state
 Restart=always
 RestartSec=5
-# Needs root for wgctrl and ipset. Everything else is taken away.
+# systemd gives up after 5 starts in 10s by default. This service is meant to
+# keep trying for as long as the machine is up: a relay that stopped retrying
+# because of a transient failure is a relay nobody notices is gone.
+StartLimitIntervalSec=0
+# Needs root for wgctrl, iptables and ipset; CAP_NET_ADMIN is the capability
+# that actually matters. The rest is taken away.
 NoNewPrivileges=yes
 ProtectHome=yes
 PrivateTmp=yes
@@ -346,6 +397,8 @@ WantedBy=multi-user.target
 UNIT
 
 systemctl daemon-reload
+systemctl enable gnl-wg.service
+systemctl restart gnl-wg.service
 systemctl enable gnl-agent.service
 # restart, not enable --now: --now leaves an already-running unit alone, so a
 # re-run with a fixed agent binary would report success while the old one kept

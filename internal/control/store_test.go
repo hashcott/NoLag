@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"testing"
+	"time"
 
 	"gamenolag/internal/api"
 )
@@ -294,5 +295,47 @@ func TestRegisterRelayRefusesAnotherContributorsRelay(t *testing.T) {
 	}
 	if endpoint != "203.0.113.10:51820" {
 		t.Errorf("endpoint = %q, want the victim's own: it was rewritten", endpoint)
+	}
+}
+
+// status only ever moved pending -> up, so a relay that rebooted, was unplugged,
+// or was simply switched off went on being offered to players forever. The agent
+// syncs every 10s; one silent for minutes is gone, not busy.
+func TestMarkStaleRelaysDown(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	key, _ := s.CreateContributorKey(ctx)
+
+	fresh, _ := s.RegisterRelay(ctx, RegisterInput{ContributorKey: key, PublicKey: "pk-fresh", Endpoint: "203.0.113.1:51820"})
+	stale, _ := s.RegisterRelay(ctx, RegisterInput{ContributorKey: key, PublicKey: "pk-stale", Endpoint: "203.0.113.2:51820"})
+
+	if err := s.RecordStatus(ctx, fresh.RelayID, api.RelayStatus{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordStatus(ctx, stale.RelayID, api.RelayStatus{}); err != nil {
+		t.Fatal(err)
+	}
+	// Age the stale one past the window.
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE relay SET last_seen = now() - interval '1 hour' WHERE id = $1`, stale.RelayID); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := s.MarkStaleRelaysDown(ctx, 5*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("marked %d relays down, want exactly the stale one", n)
+	}
+
+	var freshStatus, staleStatus string
+	s.pool.QueryRow(ctx, `SELECT status FROM relay WHERE id = $1`, fresh.RelayID).Scan(&freshStatus)
+	s.pool.QueryRow(ctx, `SELECT status FROM relay WHERE id = $1`, stale.RelayID).Scan(&staleStatus)
+	if freshStatus != "up" {
+		t.Errorf("the relay that just synced is %q, want up", freshStatus)
+	}
+	if staleStatus != "down" {
+		t.Errorf("the relay silent for an hour is %q, want down", staleStatus)
 	}
 }

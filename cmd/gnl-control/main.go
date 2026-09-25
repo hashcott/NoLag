@@ -24,6 +24,8 @@ import (
 func main() {
 	dsn := flag.String("dsn", os.Getenv("GNL_DSN"), "Postgres connection string (env GNL_DSN)")
 	listen := flag.String("listen", ":8080", "HTTP listen address")
+	staleAfter := flag.Duration("stale-after", 5*time.Minute,
+		"mark a relay down after this long without a sync")
 	poll := flag.Int("poll-secs", 10, "how often agents should sync")
 	mintKey := flag.Bool("mint-key", false, "mint one contributor key, print it, and exit")
 	flag.Parse()
@@ -68,6 +70,30 @@ func main() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		srv.Shutdown(shutdownCtx)
+	}()
+
+	// A relay that stopped syncing is gone, and a gone relay must stop being
+	// offered to players. Nothing else does this: status otherwise only ever moves
+	// pending -> up, so a rebooted or switched-off relay would be handed out
+	// forever.
+	go func() {
+		t := time.NewTicker(time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				n, err := store.MarkStaleRelaysDown(ctx, *staleAfter)
+				if err != nil {
+					log.Printf("mark stale relays: %v", err)
+					continue
+				}
+				if n > 0 {
+					log.Printf("marked %d relay(s) down after %s without a sync", n, *staleAfter)
+				}
+			}
+		}
 	}()
 
 	log.Printf("control plane listening on %s", *listen)

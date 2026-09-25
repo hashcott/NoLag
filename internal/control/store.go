@@ -243,6 +243,28 @@ func (s *Store) RecordStatus(ctx context.Context, relayID string, st api.RelaySt
 	return nil
 }
 
+// MarkStaleRelaysDown flips a relay to 'down' once it has stopped syncing.
+//
+// Without this, status only ever moves pending -> up, so a relay that died -
+// rebooted, unplugged, or whose contributor simply turned it off - is offered to
+// players forever. The agent syncs every 10s by default; a relay silent for
+// several minutes is not having a bad moment, it is gone.
+//
+// Returns how many were marked, so the caller can say so rather than doing it
+// silently.
+func (s *Store) MarkStaleRelaysDown(ctx context.Context, after time.Duration) (int, error) {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE relay
+		    SET status = 'down'
+		  WHERE status = 'up'
+		    AND (last_seen IS NULL OR last_seen < now() - $1::interval)`,
+		fmt.Sprintf("%d seconds", int(after.Seconds())))
+	if err != nil {
+		return 0, fmt.Errorf("control: mark stale relays down: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
 // DesiredState returns every peer this relay must accept and the current game
 // CIDR allowlist.
 //

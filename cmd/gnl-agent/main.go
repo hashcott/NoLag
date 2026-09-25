@@ -55,9 +55,15 @@ func main() {
 	}
 	defer dev.Close()
 
+	// Warn, do not exit. A WireGuard interface does not survive a reboot, and
+	// exiting here turned that into a crash-loop that systemd abandoned after five
+	// restarts - leaving a dead relay the control plane still reported as up.
+	// gnl-wg.service recreates the interface at boot and the agent Requires= it,
+	// so in the ordinary case this never fires; when it does, the loop keeps
+	// retrying and says so every poll rather than giving up silently.
 	if _, err := dev.Peers(*iface); err != nil {
-		log.Fatalf("cannot read interface %s: %v\n"+
-			"The installer creates it; check: ip link show %s", *iface, err, *iface)
+		log.Printf("WARNING: cannot read interface %s: %v", *iface, err)
+		log.Printf("         retrying every %s. To fix now: systemctl restart gnl-wg", *poll)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

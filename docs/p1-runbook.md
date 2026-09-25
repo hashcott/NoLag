@@ -63,6 +63,24 @@ group**. The installer says this at the end because it is the one thing it
 cannot check from inside the machine, and it is the most common reason a relay
 looks healthy locally and is unreachable from everywhere else.
 
+The installer leaves two units behind. `gnl-wg.service` recreates the WireGuard
+interface and is a oneshot that runs at every boot; `gnl-agent.service` requires
+it and does the reconciling. A WireGuard interface does not survive a reboot, so
+without the first one a rebooted relay comes back with no interface at all.
+
+Check both after a reboot, because this is the failure that used to go unnoticed
+for as long as nobody happened to look:
+
+```bash
+systemctl status gnl-wg gnl-agent
+wg show                       # the interface, its port and its peers
+```
+
+If `gnl-wg` failed, `/etc/gnl/relay.state` or `/etc/gnl/relay.key` is missing and
+the relay needs the installer run again. The control plane marks a relay `down`
+after five minutes without a sync, so a relay in this state stops being handed to
+players rather than silently swallowing their traffic.
+
 ## 4. Verify from outside
 
 From a different machine — not the relay:
