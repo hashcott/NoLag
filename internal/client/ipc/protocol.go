@@ -56,6 +56,13 @@ type Response struct {
 // ErrUnknownVerb is returned for anything outside the four.
 var ErrUnknownVerb = fmt.Errorf("ipc: unknown verb")
 
+// ErrNoService means the service could not be reached: it is not running, or
+// the caller is not admitted by the pipe's access control.
+//
+// Here rather than beside the pipe itself because the interface decides what to
+// say about it, and that decision is not Windows-specific.
+var ErrNoService = fmt.Errorf("ipc: the GameNoLag service is not reachable")
+
 // ParseRequest decodes one line and accepts it only if it names one of the four
 // verbs.
 //

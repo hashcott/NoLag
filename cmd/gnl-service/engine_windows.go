@@ -280,7 +280,13 @@ func (e *engine) poll() {
 	if err := e.applyRoutes(); err != nil {
 		e.lastErr = err.Error()
 		e.logf("applying routes: %v", err)
+		return
 	}
+	// Cleared on success, not only when a measurement happens to run. Otherwise
+	// one transient route failure leaves the interface showing a fault until the
+	// next re-rank, which is five minutes away at best and never while a game is
+	// running.
+	e.lastErr = ""
 }
 
 // checkRelay notices a relay that has stopped answering, and re-ranks the fleet
@@ -351,6 +357,16 @@ func (e *engine) remeasure(force bool) {
 	if err := e.activate(chosen.Primary, rtt); err != nil {
 		e.lastErr = err.Error()
 		e.logf("switching to relay %s: %v", chosen.Primary, err)
+		// Half-switched: the adapter may carry the new relay's address while the
+		// peers still point at the old one. Leaving the old relay marked active
+		// would look healthy on the next poll — its last handshake is recent — and
+		// nothing would repair it until the next re-rank, five minutes away.
+		// Standing down puts the player on their ordinary path and brings the
+		// thirty-second retry into play.
+		e.active, e.activeRTT = "", 0
+		if aerr := e.applyRoutes(); aerr != nil {
+			e.logf("removing routes after a failed switch: %v", aerr)
+		}
 		return
 	}
 	e.lastErr = ""
@@ -372,6 +388,9 @@ func (e *engine) teardown() {
 	}
 	e.tun, e.applier = nil, nil
 	e.installed = routes.Disconnected()
+	// Whatever went wrong belonged to the session being torn down. Keeping it
+	// would have a disconnected client reporting a fault it can no longer have.
+	e.lastErr = ""
 	e.relays, e.pins = nil, map[string]string{}
 	e.active, e.activeRTT = "", 0
 }

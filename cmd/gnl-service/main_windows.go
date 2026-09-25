@@ -98,7 +98,9 @@ func (s *service) Execute(_ []string, r <-chan svc.ChangeRequest, status chan<- 
 			// StopPending before the teardown, not after: removing routes and closing
 			// the adapter takes long enough that Windows would otherwise decide the
 			// service had hung and kill it part-way through.
-			status <- svc.Status{State: svc.StopPending}
+			// WaitHint, or the control manager decides the service has hung and
+			// kills it part-way through removing routes.
+			status <- svc.Status{State: svc.StopPending, WaitHint: 20000}
 			cancel()
 			<-done
 			status <- svc.Status{State: svc.Stopped}

@@ -14,10 +14,6 @@ import (
 	"gamenolag/internal/client/ipc"
 )
 
-// ErrNoService means the pipe is not there: the service is not running, or this
-// user is not admitted by its access control.
-var ErrNoService = fmt.Errorf("winpipe: the GameNoLag service is not reachable")
-
 // Ask sends one verb and reads the answer.
 //
 // One request per connection, which is what the server expects: the interface
@@ -26,7 +22,7 @@ var ErrNoService = fmt.Errorf("winpipe: the GameNoLag service is not reachable")
 func Ask(ctx context.Context, v ipc.Verb) (ipc.Response, error) {
 	conn, err := winio.DialPipeContext(ctx, PipeName)
 	if err != nil {
-		return ipc.Response{}, fmt.Errorf("%w: %v", ErrNoService, err)
+		return ipc.Response{}, fmt.Errorf("%w: %v", ipc.ErrNoService, err)
 	}
 	defer conn.Close()
 

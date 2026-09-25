@@ -17,7 +17,6 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -215,18 +214,7 @@ func (u *ui) show(resp ipc.Response, err error) {
 	_ = u.discon.SetEnabled(connected)
 	_ = u.reload.SetEnabled(err == nil)
 
-	next := stateOff
-	switch {
-	case err != nil:
-		next = stateOff
-	case connected && resp.Error != "":
-		// Connected and complaining: the tunnel is up but something is wrong with
-		// it, which is exactly the case a plain green icon would hide.
-		next = stateFault
-	case connected:
-		next = stateOn
-	}
-
+	next := iconFor(resp, err)
 	_ = u.status.SetText(summary(resp, err))
 	_ = u.ni.SetToolTip(tooltip(resp, err))
 	if next != u.shown {
@@ -236,56 +224,6 @@ func (u *ui) show(resp ipc.Response, err error) {
 		}
 		u.shown = next
 	}
-}
-
-// summary is the one line at the top of the menu.
-func summary(resp ipc.Response, err error) string {
-	if err != nil {
-		return friendly(err)
-	}
-	if resp.State != "connected" {
-		if resp.Error != "" {
-			return "Not connected — " + resp.Error
-		}
-		return "Not connected"
-	}
-	s := "Connected"
-	if resp.RelayID != "" {
-		s += " · " + resp.RelayID
-	}
-	if resp.TunnelRTTms > 0 {
-		s += fmt.Sprintf(" · %.0f ms", resp.TunnelRTTms)
-	}
-	return s
-}
-
-// tooltip is what hovering the icon says. Windows truncates past 127
-// characters, so this stays short by design.
-func tooltip(resp ipc.Response, err error) string {
-	s := "GameNoLag — " + summary(resp, err)
-	if err == nil && resp.State == "connected" {
-		if resp.GameRunning != "" {
-			s += "\n" + resp.GameRunning + " is running; its traffic is on the relay"
-		} else {
-			s += "\nNo game running; nothing is being routed"
-		}
-	}
-	if len(s) > 127 {
-		s = s[:124] + "…"
-	}
-	return s
-}
-
-// friendly turns the errors somebody will actually hit into something they can
-// act on, and leaves the rest alone.
-func friendly(err error) string {
-	if errors.Is(err, winpipe.ErrNoService) {
-		return "The GameNoLag service is not running"
-	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		return "The service is not answering"
-	}
-	return err.Error()
 }
 
 func (u *ui) openLogs() {
