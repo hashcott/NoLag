@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"gamenolag/internal/api"
@@ -62,7 +64,7 @@ func TestRegisterReturnsTokenAndAssignment(t *testing.T) {
 	b := &fakeBackend{registerOut: RegisterOutput{
 		RelayID: "relay-1", RelayToken: "tok", InnerSubnet: "10.77.0.0/16", InnerIP: "10.77.0.1/16",
 	}}
-	rec := post(t, NewServer(b, 10), "/v1/relay/register", "", api.RegisterRequest{
+	rec := post(t, NewServer(b, 10, false), "/v1/relay/register", "", api.RegisterRequest{
 		ContributorKey: "GNL-AAAA-BBBB-CCCC-DDDD",
 		PublicKey:      "pk", Endpoint: "203.0.113.10:51820",
 	})
@@ -81,7 +83,7 @@ func TestRegisterReturnsTokenAndAssignment(t *testing.T) {
 
 func TestRegisterRejectsUnknownKeyAsForbidden(t *testing.T) {
 	b := &fakeBackend{registerErr: ErrUnknownKey}
-	rec := post(t, NewServer(b, 10), "/v1/relay/register", "", api.RegisterRequest{
+	rec := post(t, NewServer(b, 10, false), "/v1/relay/register", "", api.RegisterRequest{
 		ContributorKey: "GNL-ZZZZ-ZZZZ-ZZZZ-ZZZZ", PublicKey: "pk", Endpoint: "203.0.113.10:51820",
 	})
 	if rec.Code != http.StatusForbidden {
@@ -101,7 +103,7 @@ func TestRegisterRequiresMandatoryFields(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			rec := post(t, NewServer(&fakeBackend{}, 10), "/v1/relay/register", "", c.req)
+			rec := post(t, NewServer(&fakeBackend{}, 10, false), "/v1/relay/register", "", c.req)
 			if rec.Code != http.StatusBadRequest {
 				t.Errorf("status = %d, want 400", rec.Code)
 			}
@@ -111,7 +113,7 @@ func TestRegisterRequiresMandatoryFields(t *testing.T) {
 
 func TestSyncRequiresBearerToken(t *testing.T) {
 	b := &fakeBackend{authErr: ErrUnauthorized}
-	rec := post(t, NewServer(b, 10), "/v1/relay/sync", "", api.SyncRequest{})
+	rec := post(t, NewServer(b, 10, false), "/v1/relay/sync", "", api.SyncRequest{})
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401", rec.Code)
 	}
@@ -123,7 +125,7 @@ func TestSyncReturnsDesiredState(t *testing.T) {
 		peers:     []api.Peer{{PublicKey: "dev-pk", InnerIP: "10.77.0.5/32"}},
 		cidrs:     []string{"20.24.48.0/20"},
 	}
-	rec := post(t, NewServer(b, 10), "/v1/relay/sync", "tok", api.SyncRequest{
+	rec := post(t, NewServer(b, 10, false), "/v1/relay/sync", "tok", api.SyncRequest{
 		Status: api.RelayStatus{ActivePeers: 2, TotalPeers: 4, RxBytes: 10, TxBytes: 20},
 	})
 	if rec.Code != http.StatusOK {
@@ -154,7 +156,7 @@ func TestSyncDropsInvalidPeers(t *testing.T) {
 			{PublicKey: "empty", InnerIP: ""},
 		},
 	}
-	rec := post(t, NewServer(b, 10), "/v1/relay/sync", "tok", api.SyncRequest{})
+	rec := post(t, NewServer(b, 10, false), "/v1/relay/sync", "tok", api.SyncRequest{})
 	var out api.SyncResponse
 	json.Unmarshal(rec.Body.Bytes(), &out)
 	if len(out.Peers) != 1 || out.Peers[0].PublicKey != "good" {
@@ -163,7 +165,7 @@ func TestSyncDropsInvalidPeers(t *testing.T) {
 }
 
 func TestRejectsWrongMethod(t *testing.T) {
-	h := NewServer(&fakeBackend{}, 10)
+	h := NewServer(&fakeBackend{}, 10, false)
 	req := httptest.NewRequest(http.MethodGet, "/v1/relay/sync", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -173,7 +175,7 @@ func TestRejectsWrongMethod(t *testing.T) {
 }
 
 func TestHealthz(t *testing.T) {
-	h := NewServer(&fakeBackend{}, 10)
+	h := NewServer(&fakeBackend{}, 10, false)
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -184,7 +186,7 @@ func TestHealthz(t *testing.T) {
 
 func TestReachabilityRecordsTheVerdict(t *testing.T) {
 	b := &fakeBackend{}
-	rec := post(t, NewServer(b, 10), "/v1/relay/reachability", "", api.ReachabilityReport{
+	rec := post(t, NewServer(b, 10, false), "/v1/relay/reachability", "", api.ReachabilityReport{
 		ContributorKey: "GNL-AAAA-BBBB-CCCC-DDDD",
 		RelayPublicKey: "relay-pk", Reachable: true,
 	})
@@ -200,7 +202,7 @@ func TestReachabilityRecordsTheVerdict(t *testing.T) {
 // anyone could mark a stranger's relay unreachable and take it out of service.
 func TestReachabilityRejectsARelayTheKeyDoesNotOwn(t *testing.T) {
 	b := &fakeBackend{reachErr: ErrUnknownKey}
-	rec := post(t, NewServer(b, 10), "/v1/relay/reachability", "", api.ReachabilityReport{
+	rec := post(t, NewServer(b, 10, false), "/v1/relay/reachability", "", api.ReachabilityReport{
 		ContributorKey: "GNL-ZZZZ-ZZZZ-ZZZZ-ZZZZ", RelayPublicKey: "someone-elses", Reachable: false,
 	})
 	if rec.Code != http.StatusForbidden {
@@ -213,9 +215,118 @@ func TestReachabilityRequiresBothFields(t *testing.T) {
 		{RelayPublicKey: "pk"},
 		{ContributorKey: "GNL-A"},
 	} {
-		rec := post(t, NewServer(&fakeBackend{}, 10), "/v1/relay/reachability", "", r)
+		rec := post(t, NewServer(&fakeBackend{}, 10, false), "/v1/relay/reachability", "", r)
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("status = %d for %+v, want 400", rec.Code, r)
 		}
+	}
+}
+
+// Spec 10.2. The 80-bit contributor key spends entropy on being typable, and the
+// reasoning for that is that guessing is rate limited - so this is what makes
+// that reasoning true. It also bounds the damage a flood does without guessing
+// anything: every register with a fresh public key burns a value from the relay
+// subnet sequence, and the sequence does not recycle.
+func TestRegisterIsRateLimited(t *testing.T) {
+	b := &fakeBackend{registerErr: ErrUnknownKey} // every attempt fails, as when probing
+	h := NewServer(b, 10, false)
+
+	var lastCode int
+	for i := 0; i < 40; i++ {
+		rec := post(t, h, "/v1/relay/register", "", api.RegisterRequest{
+			ContributorKey: "GNL-AAAA-BBBB-CCCC-DDDD",
+			PublicKey:      "pk", Endpoint: "203.0.113.10:51820",
+		})
+		lastCode = rec.Code
+	}
+	if lastCode != http.StatusTooManyRequests {
+		t.Errorf("after 40 attempts the status is %d, want 429", lastCode)
+	}
+}
+
+// The reply must not say which bucket tripped or how much budget remains: that
+// tells somebody probing the key space how to pace themselves.
+func TestRateLimitReplyLeaksNothing(t *testing.T) {
+	b := &fakeBackend{registerErr: ErrUnknownKey}
+	h := NewServer(b, 10, false)
+	var body string
+	for i := 0; i < 40; i++ {
+		rec := post(t, h, "/v1/relay/register", "", api.RegisterRequest{
+			ContributorKey: "GNL-AAAA-BBBB-CCCC-DDDD", PublicKey: "pk", Endpoint: "203.0.113.10:51820",
+		})
+		if rec.Code == http.StatusTooManyRequests {
+			body = rec.Body.String()
+			break
+		}
+	}
+	if body == "" {
+		t.Fatal("never hit the limit")
+	}
+	for _, leak := range []string{"ip", "IP", "prefix", "remaining", "bucket"} {
+		if strings.Contains(body, leak) {
+			t.Errorf("the 429 body mentions %q: %s", leak, body)
+		}
+	}
+}
+
+// A contributor setting up their relay must not be locked out by somebody else's
+// flood from a different address.
+func TestRateLimitIsPerIPNotGlobal(t *testing.T) {
+	b := &fakeBackend{registerOut: RegisterOutput{RelayID: "r", RelayToken: "t"}}
+	h := NewServer(b, 10, false)
+
+	drain := func(addr string) int {
+		var code int
+		for i := 0; i < 40; i++ {
+			body, _ := json.Marshal(api.RegisterRequest{
+				ContributorKey: "GNL-" + addr[:4] + "-BBBB-CCCC-DDDD",
+				PublicKey:      "pk", Endpoint: "203.0.113.10:51820",
+			})
+			req := httptest.NewRequest(http.MethodPost, "/v1/relay/register", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req.RemoteAddr = addr + ":1234"
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			code = rec.Code
+		}
+		return code
+	}
+	if drain("9999") != http.StatusTooManyRequests {
+		t.Fatal("the flooding address was never limited")
+	}
+	body, _ := json.Marshal(api.RegisterRequest{
+		ContributorKey: "GNL-ZZZZ-BBBB-CCCC-DDDD", PublicKey: "pk", Endpoint: "203.0.113.10:51820",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/relay/register", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = "203.0.113.77:5555"
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code == http.StatusTooManyRequests {
+		t.Error("an unrelated address was locked out by somebody else's flood")
+	}
+}
+
+// X-Forwarded-For must be ignored unless the operator says a proxy sets it,
+// otherwise every client picks its own bucket and the limit means nothing.
+func TestForwardedForIsIgnoredUnlessTrusted(t *testing.T) {
+	b := &fakeBackend{registerErr: ErrUnknownKey}
+	h := NewServer(b, 10, false)
+	var code int
+	for i := 0; i < 40; i++ {
+		body, _ := json.Marshal(api.RegisterRequest{
+			ContributorKey: "GNL-AAAA-BBBB-CCCC-DDDD", PublicKey: "pk", Endpoint: "203.0.113.10:51820",
+		})
+		req := httptest.NewRequest(http.MethodPost, "/v1/relay/register", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Forwarded-For", fmt.Sprintf("10.0.0.%d", i)) // a new "client" each time
+		req.RemoteAddr = "198.51.100.5:9999"
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		code = rec.Code
+	}
+	if code != http.StatusTooManyRequests {
+		t.Error("spoofed X-Forwarded-For values each got their own bucket; the limit " +
+			"can be bypassed by anyone who sets a header")
 	}
 }

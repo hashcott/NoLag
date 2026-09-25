@@ -24,6 +24,9 @@ import (
 func main() {
 	dsn := flag.String("dsn", os.Getenv("GNL_DSN"), "Postgres connection string (env GNL_DSN)")
 	listen := flag.String("listen", ":8080", "HTTP listen address")
+	trustProxy := flag.Bool("trust-proxy", false,
+		"honour X-Forwarded-For for rate limiting; set this ONLY when a reverse proxy "+
+			"you control really does set it, or every client picks its own bucket")
 	staleAfter := flag.Duration("stale-after", 5*time.Minute,
 		"mark a relay down after this long without a sync")
 	poll := flag.Int("poll-secs", 10, "how often agents should sync")
@@ -59,7 +62,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              *listen,
-		Handler:           control.NewServer(store, *poll),
+		Handler:           control.NewServer(store, *poll, *trustProxy),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      30 * time.Second,

@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"gamenolag/internal/api"
 )
@@ -28,11 +29,31 @@ type Backend interface {
 type server struct {
 	b        Backend
 	pollSecs int
+
+	// Spec 10.2. Both limiters guard the endpoints that consume a contributor
+	// key, and they run before the store is touched - so they also bound the
+	// other damage a flood does, which is burning values from the relay subnet
+	// sequence that never recycles.
+	byIP  *Limiter
+	byKey *Limiter
+
+	// Set only when something in front of this really does set X-Forwarded-For.
+	trustProxy bool
 }
 
 // NewServer returns the control plane's HTTP handler.
-func NewServer(b Backend, pollSecs int) http.Handler {
-	s := &server{b: b, pollSecs: pollSecs}
+func NewServer(b Backend, pollSecs int, trustProxy bool) http.Handler {
+	s := &server{
+		b:        b,
+		pollSecs: pollSecs,
+		// A contributor registers once, and re-runs the installer a handful of
+		// times at worst. Twenty an hour is far above honest use and far below
+		// anything useful for probing.
+		byIP:  NewLimiter(20, time.Hour),
+		byKey: NewLimiter(20, time.Hour),
+
+		trustProxy: trustProxy,
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/relay/register", s.handleRegister)
 	mux.HandleFunc("/v1/relay/sync", s.handleSync)
@@ -63,6 +84,10 @@ func (s *server) handleReachability(w http.ResponseWriter, r *http.Request) {
 		req.Detail = req.Detail[:500]
 	}
 
+	if !s.limit(w, r, req.ContributorKey) {
+		return
+	}
+
 	err := s.b.RecordReachability(r.Context(), req.ContributorKey, req.RelayPublicKey, req.Reachable, req.Detail)
 	if errors.Is(err, ErrUnknownKey) {
 		writeErr(w, http.StatusForbidden, "that key does not own a relay with that public key",
@@ -85,6 +110,47 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func writeErr(w http.ResponseWriter, code int, msg, hint string) {
 	writeJSON(w, code, api.ErrorResponse{Error: msg, Hint: hint})
+}
+
+// clientIP is the address to rate limit against.
+//
+// X-Forwarded-For is honoured only when the control plane is told it sits behind
+// a proxy. Trusting it unconditionally would hand every client its own rate limit
+// bucket, chosen by the client - which is not a rate limit at all.
+func clientIP(r *http.Request, trustProxy bool) string {
+	if trustProxy {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			if i := strings.IndexByte(xff, ','); i > 0 {
+				return strings.TrimSpace(xff[:i])
+			}
+			return strings.TrimSpace(xff)
+		}
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+// limit applies both buckets and answers 429 when either is exhausted.
+//
+// The reply says nothing about which bucket tripped or how much budget is left:
+// that would tell someone probing the key space how to pace themselves.
+func (s *server) limit(w http.ResponseWriter, r *http.Request, contributorKey string) bool {
+	ipOK := s.byIP.Allow(clientIP(r, s.trustProxy))
+	keyOK := true
+	if contributorKey != "" {
+		keyOK = s.byKey.Allow(KeyPrefix(contributorKey))
+	}
+	if ipOK && keyOK {
+		return true
+	}
+	w.Header().Set("Retry-After", "3600")
+	writeErr(w, http.StatusTooManyRequests, "too many requests",
+		"wait an hour and try again; if you are setting up a relay and hit this, "+
+			"you are re-running the installer more than expected")
+	return false
 }
 
 func (s *server) handleRegister(w http.ResponseWriter, r *http.Request) {
@@ -111,6 +177,9 @@ func (s *server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if _, _, err := net.SplitHostPort(req.Endpoint); err != nil {
 		writeErr(w, http.StatusBadRequest, "endpoint must be host:port",
 			"for example 203.0.113.10:51820")
+		return
+	}
+	if !s.limit(w, r, req.ContributorKey) {
 		return
 	}
 

@@ -127,7 +127,7 @@ func TestAuthenticateRelayRejectsBadToken(t *testing.T) {
 	}
 }
 
-func TestRecordStatusMarksRelayUp(t *testing.T) {
+func TestRecordStatusStoresCountersWithoutClaimingReachable(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	key, _ := s.CreateContributorKey(ctx)
@@ -144,16 +144,24 @@ func TestRecordStatusMarksRelayUp(t *testing.T) {
 
 	var status string
 	var active int
+	var lastSeen *time.Time
 	err = s.pool.QueryRow(ctx,
-		`SELECT status, active_peers FROM relay WHERE id = $1`, out.RelayID).Scan(&status, &active)
+		`SELECT status, active_peers, last_seen FROM relay WHERE id = $1`, out.RelayID).
+		Scan(&status, &active, &lastSeen)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if active != 3 {
 		t.Errorf("active_peers = %d, want 3", active)
 	}
-	if status != "up" {
-		t.Errorf("status = %q, want up: a relay that syncs is reachable from us", status)
+	if lastSeen == nil {
+		t.Error("last_seen was not recorded")
+	}
+	// The point of the change: a sync proves the relay reached US. Whether a
+	// player can reach IT is a different question, settled only by an external
+	// check. See TestSyncingAloneDoesNotMakeARelayUp.
+	if status != "pending" {
+		t.Errorf("status = %q, want pending: syncing alone must not claim reachable", status)
 	}
 }
 
@@ -309,6 +317,13 @@ func TestMarkStaleRelaysDown(t *testing.T) {
 	fresh, _ := s.RegisterRelay(ctx, RegisterInput{ContributorKey: key, PublicKey: "pk-fresh", Endpoint: "203.0.113.1:51820"})
 	stale, _ := s.RegisterRelay(ctx, RegisterInput{ContributorKey: key, PublicKey: "pk-stale", Endpoint: "203.0.113.2:51820"})
 
+	// Both must be genuinely up first: the sweep moves up -> down, and a relay
+	// that was never verified reachable has nothing to fall from.
+	for _, pk := range []string{"pk-fresh", "pk-stale"} {
+		if err := s.RecordReachability(ctx, key, pk, true, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := s.RecordStatus(ctx, fresh.RelayID, api.RelayStatus{}); err != nil {
 		t.Fatal(err)
 	}

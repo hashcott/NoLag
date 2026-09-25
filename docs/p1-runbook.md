@@ -22,6 +22,18 @@ relay to the control plane.
 
 ## 2. Mint a contributor key
 
+The key-consuming endpoints are limited to 20 requests an hour per source address
+and per key prefix. A contributor registers once and re-runs the installer at
+worst a handful of times, so this is far above honest use — but if you are
+scripting a bulk setup you will meet it, and the answer is to pace the script
+rather than raise the limit.
+
+If the control plane sits behind a reverse proxy, start it with `-trust-proxy`
+so the limit counts the real client rather than the proxy. Do **not** set it
+otherwise: `X-Forwarded-For` is client-supplied, so trusting it without a proxy
+in front lets every caller pick its own bucket, and the limit stops meaning
+anything.
+
 ```bash
 gnl-control -mint-key
 ```
