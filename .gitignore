@@ -1,0 +1,12 @@
+# Built binaries
+/gnl-probe
+/gnl-analyze
+/gnl-agent
+/gnl-control
+/gnl-relaycheck
+
+# Measurement campaign output
+*.jsonl
+
+# Subagent-driven-development workspace (scratch, per-plan)
+.superpowers/
