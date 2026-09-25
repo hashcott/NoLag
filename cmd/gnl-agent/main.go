@@ -28,6 +28,7 @@ func main() {
 	tokenFile := flag.String("token-file", "/etc/gnl/relay.token", "file holding this relay's token")
 	iface := flag.String("iface", "wg0", "WireGuard interface name")
 	setName := flag.String("ipset", "gnl-games", "ipset holding the egress allowlist")
+	stateFile := flag.String("state-file", "/etc/gnl/relay.state", "what the installer recorded about this host")
 	poll := flag.Duration("poll", 10*time.Second, "how often to sync")
 	flag.Parse()
 
@@ -64,11 +65,24 @@ func main() {
 
 	log.Printf("gnl-agent %s: syncing %s with %s every %s", agent.Version, *iface, *control, *poll)
 
+	// Re-assert the egress policy each poll. Without a state file the agent cannot
+	// know the rules this host installed, so it says so and carries on doing the
+	// rest rather than refusing to run - but a relay in that condition has nobody
+	// watching its forwarding policy, which is worth saying out loud.
+	var reassert func() error
+	if st, err := agent.LoadRelayState(*stateFile); err != nil {
+		log.Printf("WARNING: %v: the egress firewall will not be re-asserted. "+
+			"If anything resets the FORWARD policy, this relay becomes an open "+
+			"forwarder on your address and nothing here will notice.", err)
+	} else {
+		reassert = func() error { return agent.ReassertFirewall(st, agent.RunIptables) }
+	}
+
 	agent.Loop(ctx, agent.Config{
 		ControlURL: *control,
 		Token:      token,
 		Iface:      *iface,
 		SetName:    *setName,
 		Poll:       *poll,
-	}, dev, agent.NewHTTPSyncer(*control, token), ipsetsync.ApplyWithIpset)
+	}, dev, agent.NewHTTPSyncer(*control, token), ipsetsync.ApplyWithIpset, reassert)
 }

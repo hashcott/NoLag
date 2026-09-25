@@ -89,3 +89,26 @@ func TestApplyDiffConverges(t *testing.T) {
 		t.Errorf("reconcile is not idempotent: second diff = %+v", c)
 	}
 }
+
+// A peer carrying more than one AllowedIP must read as different from the single
+// /32 the control plane assigned, so the loop corrects it. Reading only index 0
+// made the diff blind: a second entry such as 0.0.0.0/0 compared equal on the
+// first prefix and was never repaired, while that peer received every other
+// client's return traffic.
+func TestPeersReportsEveryAllowedIP(t *testing.T) {
+	d := NewFakeDevice()
+	d.Apply("wg0", Change{Add: []api.Peer{{PublicKey: "k1", InnerIP: "10.77.0.5/32,0.0.0.0/0"}}})
+
+	current, err := d.Peers("wg0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired := []api.Peer{{PublicKey: "k1", InnerIP: "10.77.0.5/32"}}
+	c := Diff(current, desired)
+	if len(c.Update) != 1 {
+		t.Fatalf("Diff produced %+v; a peer with an extra AllowedIP must be corrected", c)
+	}
+	if c.Update[0].InnerIP != "10.77.0.5/32" {
+		t.Errorf("update sets %q, want the assigned /32 alone", c.Update[0].InnerIP)
+	}
+}

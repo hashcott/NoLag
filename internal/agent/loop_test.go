@@ -35,7 +35,7 @@ func TestRunOnceAppliesDesiredPeers(t *testing.T) {
 	var appliedCIDRs []string
 	apply := func(_ string, sorted []string) error { appliedCIDRs = sorted; return nil }
 
-	err := RunOnce(context.Background(), dev, cp, ipsetsync.New("gnl-games"), "wg0", apply)
+	err := RunOnce(context.Background(), dev, cp, ipsetsync.New("gnl-games"), "wg0", apply, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestRunOnceIsIdempotent(t *testing.T) {
 	apply := func(string, []string) error { applyCalls++; return nil }
 
 	for i := 0; i < 3; i++ {
-		if err := RunOnce(context.Background(), dev, cp, sets, "wg0", apply); err != nil {
+		if err := RunOnce(context.Background(), dev, cp, sets, "wg0", apply, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -81,7 +81,7 @@ func TestRunOnceRemovesRevokedPeer(t *testing.T) {
 	}})
 
 	cp := &fakeCP{resp: api.SyncResponse{Peers: []api.Peer{{PublicKey: "k1", InnerIP: "10.77.0.5/32"}}}}
-	if err := RunOnce(context.Background(), dev, cp, ipsetsync.New("s"), "wg0", func(string, []string) error { return nil }); err != nil {
+	if err := RunOnce(context.Background(), dev, cp, ipsetsync.New("s"), "wg0", func(string, []string) error { return nil }, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -102,7 +102,7 @@ func TestRunOnceLeavesPeersAloneWhenControlPlaneFails(t *testing.T) {
 	}})
 
 	cp := &fakeCP{err: errors.New("connection refused")}
-	err := RunOnce(context.Background(), dev, cp, ipsetsync.New("s"), "wg0", func(string, []string) error { return nil })
+	err := RunOnce(context.Background(), dev, cp, ipsetsync.New("s"), "wg0", func(string, []string) error { return nil }, nil)
 	if err == nil {
 		t.Error("RunOnce must report the failure so it can be logged")
 	}
@@ -121,7 +121,7 @@ func TestRunOnceReportsStatusUpward(t *testing.T) {
 	}})
 	cp := &fakeCP{}
 
-	if err := RunOnce(context.Background(), dev, cp, ipsetsync.New("s"), "wg0", func(string, []string) error { return nil }); err != nil {
+	if err := RunOnce(context.Background(), dev, cp, ipsetsync.New("s"), "wg0", func(string, []string) error { return nil }, nil); err != nil {
 		t.Fatal(err)
 	}
 	if cp.statusSeen.TotalPeers != 2 {
@@ -142,7 +142,7 @@ func TestRunOncePeersSucceedEvenIfIPSetFails(t *testing.T) {
 	}}
 	apply := func(string, []string) error { return errors.New("ipset: command not found") }
 
-	err := RunOnce(context.Background(), dev, cp, ipsetsync.New("s"), "wg0", apply)
+	err := RunOnce(context.Background(), dev, cp, ipsetsync.New("s"), "wg0", apply, nil)
 	if err == nil {
 		t.Error("RunOnce must report the ipset failure")
 	}

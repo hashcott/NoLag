@@ -254,3 +254,45 @@ func TestSubnetNotReusedAfterDelete(t *testing.T) {
 		t.Errorf("new relay reused %s from the deleted relay a", c.InnerSubnet)
 	}
 }
+
+// A relay's WireGuard public key is not a secret: the installer prints it, the
+// runbook uses it, and every client that connects is told it. Matching on it
+// alone let any valid contributor key adopt somebody else's relay - receiving a
+// working token for it, reading its whole peer list, rewriting its endpoint, and
+// locking the real agent out. TestRegisterRelayIsIdempotentForTheSamePublicKey
+// cannot see this: it re-registers under the same contributor key.
+func TestRegisterRelayRefusesAnotherContributorsRelay(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+
+	victimKey, _ := s.CreateContributorKey(ctx)
+	attackerKey, _ := s.CreateContributorKey(ctx)
+
+	victim, err := s.RegisterRelay(ctx, RegisterInput{
+		ContributorKey: victimKey, PublicKey: "relay-pk-victim", Endpoint: "203.0.113.10:51820",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = s.RegisterRelay(ctx, RegisterInput{
+		ContributorKey: attackerKey,
+		PublicKey:      "relay-pk-victim", // public by construction
+		Endpoint:       "198.51.100.66:51820",
+	})
+	if !errors.Is(err, ErrUnknownKey) {
+		t.Fatalf("err = %v, want ErrUnknownKey: a valid contributor key must not adopt another contributor's relay", err)
+	}
+
+	// The victim's own token must still work, and its endpoint must be untouched.
+	if _, err := s.AuthenticateRelay(ctx, victim.RelayToken); err != nil {
+		t.Errorf("the legitimate agent was locked out: %v", err)
+	}
+	var endpoint string
+	if err := s.pool.QueryRow(ctx, `SELECT endpoint FROM relay WHERE id = $1`, victim.RelayID).Scan(&endpoint); err != nil {
+		t.Fatal(err)
+	}
+	if endpoint != "203.0.113.10:51820" {
+		t.Errorf("endpoint = %q, want the victim's own: it was rewritten", endpoint)
+	}
+}

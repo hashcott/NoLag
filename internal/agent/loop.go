@@ -54,6 +54,7 @@ func RunOnce(
 	sets *ipsetsync.Syncer,
 	iface string,
 	applyIPSet func(setName string, sorted []string) error,
+	reassertFirewall func() error,
 ) error {
 	st, err := dev.Stats(iface)
 	if err != nil {
@@ -97,6 +98,17 @@ func RunOnce(
 		errs = append(errs, fmt.Errorf("agent: apply allowlist: %w", err))
 	}
 
+	// Re-assert the egress policy every poll. The installer sets it once and
+	// exits, so nothing owns it afterwards: anything that puts FORWARD back to
+	// ACCEPT turns this relay into an open forwarder on the contributor's own IP,
+	// silently, because the five rules are all ACCEPT and block nothing by
+	// themselves. Idempotent, so the steady state is one -C per rule.
+	if reassertFirewall != nil {
+		if err := reassertFirewall(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
 	return errors.Join(errs...)
 }
 
@@ -107,13 +119,14 @@ func Loop(
 	dev wgsync.Device,
 	cp Syncer,
 	applyIPSet func(setName string, sorted []string) error,
+	reassertFirewall func() error,
 ) {
 	sets := ipsetsync.New(cfg.SetName)
 	ticker := time.NewTicker(cfg.Poll)
 	defer ticker.Stop()
 
 	for {
-		if err := RunOnce(ctx, dev, cp, sets, cfg.Iface, applyIPSet); err != nil {
+		if err := RunOnce(ctx, dev, cp, sets, cfg.Iface, applyIPSet, reassertFirewall); err != nil {
 			log.Printf("agent: %v", err)
 		}
 		select {

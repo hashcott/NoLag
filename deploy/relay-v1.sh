@@ -58,15 +58,56 @@ fi
 
 # ---------------------------------------------------------------- uninstall
 if [[ $UNINSTALL -eq 1 ]]; then
+  # Undo exactly what was installed. The old version deleted a FORWARD rule whose
+  # spec did not match the one it had added, so iptables refused it, the failure
+  # was swallowed, ipset destroy then failed because the set was still referenced,
+  # that was swallowed too - and the script printed "Removed." and exited 0. A
+  # contributor who ran the documented removal command was left with a DROP
+  # forwarding policy on their own machine, permanently, with nothing to trace it to.
+  if [[ -r /etc/gnl/relay.state ]]; then
+    # shellcheck source=/dev/null
+    . /etc/gnl/relay.state
+  else
+    echo "!! /etc/gnl/relay.state is missing, so the exact rules this host installed" >&2
+    echo "   are unknown. Removing what can be identified; check by hand afterwards:" >&2
+    echo "     iptables -S FORWARD; iptables -t nat -S POSTROUTING; ipset list" >&2
+  fi
+
   systemctl disable --now gnl-agent.service 2>/dev/null || true
   rm -f /etc/systemd/system/gnl-agent.service
   systemctl daemon-reload 2>/dev/null || true
   ip link del "$IFACE" 2>/dev/null || true
-  iptables -D FORWARD -m set --match-set "$SETNAME" dst -j ACCEPT 2>/dev/null || true
+
+  if [[ -n "${INNER_SUBNET:-}" ]]; then
+    iptables -D FORWARD -s "$INNER_SUBNET" -m set --match-set "$SETNAME" dst -j ACCEPT 2>/dev/null || true
+    iptables -D FORWARD -d "$INNER_SUBNET" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+    iptables -t nat -D POSTROUTING -s "$INNER_SUBNET" -o "$WAN" -j MASQUERADE 2>/dev/null || true
+  fi
+  iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+  iptables -D INPUT -p udp --dport "${PORT:-51820}" -j ACCEPT 2>/dev/null || true
+
+  # Put the forwarding policy back. Leaving DROP behind breaks Docker, libvirt, a
+  # VPN or any NAT the owner runs themselves, with no sign of what did it.
+  iptables -P FORWARD "${PREV_FORWARD_POLICY:-ACCEPT}" 2>/dev/null || true
+  command -v ip6tables >/dev/null 2>&1 && { ip6tables -P FORWARD ACCEPT 2>/dev/null || true; }
+
   ipset destroy "$SETNAME" 2>/dev/null || true
+
   rm -f /usr/local/bin/gnl-agent /etc/sysctl.d/99-gnl-relay.conf
-  echo "==> Removed. /etc/gnl was left in place; delete it by hand if you are done:"
-  echo "    rm -rf /etc/gnl"
+  # Re-read sysctls, or the loosened rp_filter stays live until a reboot.
+  sysctl -q --system 2>/dev/null || true
+
+  if command -v netfilter-persistent >/dev/null 2>&1; then
+    netfilter-persistent save >/dev/null 2>&1 || true
+  elif [[ -d /etc/sysconfig ]]; then
+    iptables-save > /etc/sysconfig/iptables 2>/dev/null || true
+  fi
+
+  echo "==> Removed: service, interface, firewall rules, sysctls."
+  echo "    FORWARD policy restored to ${PREV_FORWARD_POLICY:-ACCEPT}."
+  echo "    Verify:  iptables -S FORWARD; iptables -t nat -S POSTROUTING; ipset list"
+  echo "    /etc/gnl still holds this relay's private key; delete it by hand if you"
+  echo "    are done:  rm -rf /etc/gnl"
   exit 0
 fi
 
@@ -220,6 +261,11 @@ add_rule() { # add_rule <table> <chain> <rule...>
   iptables -t "$table" -C "$chain" "$@" 2>/dev/null || iptables -t "$table" -I "$chain" 1 "$@"
 }
 
+# Remember the policy being replaced, so --uninstall can put it back rather than
+# leaving a machine that also runs Docker, libvirt or a VPN unable to forward its
+# owner's own traffic.
+PREV_FORWARD_POLICY="$(iptables -S FORWARD 2>/dev/null | awk '/^-P FORWARD/{print $3; exit}')"
+PREV_FORWARD_POLICY="${PREV_FORWARD_POLICY:-ACCEPT}"
 iptables -P FORWARD DROP
 add_rule filter FORWARD -s "$INNER_SUBNET" -m set --match-set "$SETNAME" dst -j ACCEPT
 add_rule filter FORWARD -d "$INNER_SUBNET" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
@@ -228,6 +274,19 @@ add_rule nat POSTROUTING -s "$INNER_SUBNET" -o "$WAN" -j MASQUERADE
 # is UDP, but HTTPS shares the same address ranges and is TCP.
 add_rule mangle FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 add_rule filter INPUT -p udp --dport "$PORT" -j ACCEPT
+
+# Record what this install actually applied. Without it --uninstall cannot
+# reconstruct the rules it needs to delete: iptables -D requires the exact
+# rule-spec, and INNER_SUBNET is only ever known from the registration response.
+cat > /etc/gnl/relay.state <<STATEEOF
+INNER_SUBNET=$INNER_SUBNET
+WAN=$WAN
+PORT=$PORT
+IFACE=$IFACE
+SETNAME=$SETNAME
+PREV_FORWARD_POLICY=$PREV_FORWARD_POLICY
+STATEEOF
+chmod 0600 /etc/gnl/relay.state
 
 # The tunnel is IPv4 only. iptables -P FORWARD DROP above governs IPv4 alone, so
 # without this the box would forward IPv6 wherever it was asked to - straight
@@ -240,10 +299,21 @@ else
   echo "         be forwarded over it without passing the game-CIDR allowlist." >&2
 fi
 
-if command -v netfilter-persistent >/dev/null 2>&1; then
-  netfilter-persistent save >/dev/null 2>&1 || true
-elif [[ -d /etc/sysconfig ]]; then
-  iptables-save > /etc/sysconfig/iptables 2>/dev/null || true
+# Persistence that fails is reported, never assumed. Without it a reboot brings
+# the box back with ip_forward=1 (which IS persisted below) and FORWARD back at
+# its default, usually ACCEPT - an open forwarder on somebody else's address.
+if command -v netfilter-persistent >/dev/null 2>&1 && netfilter-persistent save >/dev/null 2>&1; then
+  echo "==> firewall rules persisted via netfilter-persistent"
+elif [[ -d /etc/sysconfig ]] && iptables-save > /etc/sysconfig/iptables 2>/dev/null; then
+  command -v ip6tables-save >/dev/null 2>&1 && ip6tables-save > /etc/sysconfig/ip6tables 2>/dev/null || true
+  echo "==> firewall rules persisted to /etc/sysconfig/iptables"
+else
+  echo "!! Could not persist the firewall rules on this distro." >&2
+  echo "   After a reboot this host comes back with IP forwarding ON and the" >&2
+  echo "   FORWARD policy back at its default, which on most systems is ACCEPT:" >&2
+  echo "   an open forwarder on your IP address. Install iptables-persistent" >&2
+  echo "   (apt-get install -y iptables-persistent) and re-run this script, or" >&2
+  echo "   save the rules the way your distro expects before rebooting." >&2
 fi
 
 # ------------------------------------------------------------------- agent
@@ -263,7 +333,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/gnl-agent -control $CONTROL -iface $IFACE -ipset $SETNAME
+ExecStart=/usr/local/bin/gnl-agent -control $CONTROL -iface $IFACE -ipset $SETNAME -state-file /etc/gnl/relay.state
 Restart=always
 RestartSec=5
 # Needs root for wgctrl and ipset. Everything else is taken away.

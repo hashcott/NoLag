@@ -121,13 +121,36 @@ func (s *Store) RegisterRelay(ctx context.Context, in RegisterInput) (RegisterOu
 	}
 	defer tx.Rollback(ctx)
 
+	// Scoped by key_hash as well as public key. A relay's WireGuard public key is
+	// not a secret - the installer prints it, the runbook uses it to verify
+	// reachability, and every client that connects must be told it. Matching on it
+	// alone would let any holder of any valid contributor key re-register somebody
+	// else's relay: they would receive a working token for it, read its entire peer
+	// list, rewrite its endpoint, and lock the real agent out with a rotated token.
+	// Contributors are semi-trusted third parties, which is exactly who this stops.
 	var relayID, subnet string
 	err = tx.QueryRow(ctx,
-		`SELECT id, inner_subnet FROM relay WHERE wg_pubkey = $1 FOR UPDATE`, in.PublicKey).
+		`SELECT id, inner_subnet FROM relay WHERE wg_pubkey = $1 AND key_hash = $2 FOR UPDATE`,
+		in.PublicKey, keyHash).
 		Scan(&relayID, &subnet)
 
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
+		// No relay with this public key under THIS contributor key. It may still
+		// exist under a different one, in which case this is somebody trying to
+		// adopt another contributor's relay. Refuse it here rather than letting the
+		// insert collide on UNIQUE(wg_pubkey) and surface as an opaque database
+		// error, and refuse it with the same vague message an unknown key gets, so
+		// registering is not an oracle for which public keys are already enrolled.
+		var taken bool
+		if err := tx.QueryRow(ctx,
+			`SELECT EXISTS(SELECT 1 FROM relay WHERE wg_pubkey = $1)`, in.PublicKey).Scan(&taken); err != nil {
+			return RegisterOutput{}, fmt.Errorf("control: check public key: %w", err)
+		}
+		if taken {
+			return RegisterOutput{}, ErrUnknownKey
+		}
+
 		// New relay. Allocate the next /16 out of 10.x.0.0/16 from a sequence.
 		//
 		// A sequence, not SELECT COUNT(*)+77: deleting a relay lowers a count, so
@@ -162,8 +185,8 @@ func (s *Store) RegisterRelay(ctx context.Context, in RegisterInput) (RegisterOu
 		// Keeping the subnet is what lets existing peer bindings stay valid.
 		_, err = tx.Exec(ctx,
 			`UPDATE relay SET token_hash = $1, endpoint = $2, region = $3, hostname = $4
-			 WHERE id = $5`,
-			Hash(token), in.Endpoint, in.Region, in.Hostname, relayID)
+			 WHERE id = $5 AND key_hash = $6`,
+			Hash(token), in.Endpoint, in.Region, in.Hostname, relayID, keyHash)
 		if err != nil {
 			return RegisterOutput{}, fmt.Errorf("control: rotate relay token: %w", err)
 		}

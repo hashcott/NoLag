@@ -3,6 +3,7 @@ package wgsync
 import (
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -54,10 +55,17 @@ func (d *wgctlDevice) Peers(iface string) ([]api.Peer, error) {
 	}
 	out := make([]api.Peer, 0, len(dev.Peers))
 	for _, p := range dev.Peers {
-		inner := ""
-		if len(p.AllowedIPs) > 0 {
-			inner = p.AllowedIPs[0].String()
+		// Every AllowedIP, not just the first. Reading index 0 alone made the diff
+		// blind to a second entry: somebody with root on the relay could add
+		// 0.0.0.0/0 to a peer and the loop would compare the first prefix, see a
+		// match, and never repair it - while that peer received every other
+		// client's return traffic. Joining them means any deviation from the single
+		// /32 the control plane assigned reads as an Update and is corrected.
+		parts := make([]string, 0, len(p.AllowedIPs))
+		for _, a := range p.AllowedIPs {
+			parts = append(parts, a.String())
 		}
+		inner := strings.Join(parts, ",")
 		out = append(out, api.Peer{PublicKey: p.PublicKey.String(), InnerIP: inner})
 	}
 	return out, nil
