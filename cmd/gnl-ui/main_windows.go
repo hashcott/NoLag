@@ -69,6 +69,19 @@ func main() {
 		fatal("Could not show the tray icon", err)
 	}
 
+	// The window is an addition to the tray, not a replacement for it: if it
+	// cannot be built, the icon and its menu still work.
+	if p, err := newPanels(u); err != nil {
+		_ = ni.ShowError("GameNoLag", "Could not create the window: "+err.Error())
+	} else {
+		u.win = p
+		ni.MouseDown().Attach(func(_, _ int, b walk.MouseButton) {
+			if b == walk.LeftButton {
+				p.toggleMini()
+			}
+		})
+	}
+
 	go u.pollLoop()
 	mw.Run()
 }
@@ -88,6 +101,14 @@ type ui struct {
 	// shown is the state the icon is currently displaying, so a notification is
 	// raised on a change rather than on every poll.
 	shown state
+
+	// What the window draws, kept whether or not it is open so that opening it
+	// shows the last three minutes at once. All of it is touched only on the GUI
+	// thread.
+	view view
+	hist history
+	log  eventLog
+	win  *panels // nil if the window could not be built
 }
 
 func (u *ui) build() error {
@@ -100,6 +121,7 @@ func (u *ui) build() error {
 		u.icons[s] = ic
 	}
 	u.shown = stateOff
+	u.view = viewOf(ipc.Response{}, nil)
 	if err := u.ni.SetIcon(u.icons[stateOff]); err != nil {
 		return err
 	}
@@ -125,6 +147,14 @@ func (u *ui) build() error {
 	_ = u.reload.SetText("Refresh game list")
 	u.reload.Triggered().Attach(func() { u.send(ipc.VerbReloadProfile, "Refreshing…") })
 
+	open := walk.NewAction()
+	_ = open.SetText("Open window")
+	open.Triggered().Attach(func() {
+		if u.win != nil {
+			u.win.showFull()
+		}
+	})
+
 	logs := walk.NewAction()
 	_ = logs.SetText("Open log folder")
 	logs.Triggered().Attach(u.openLogs)
@@ -139,7 +169,7 @@ func (u *ui) build() error {
 	})
 
 	for _, a := range []*walk.Action{
-		u.status, walk.NewSeparatorAction(),
+		u.status, open, walk.NewSeparatorAction(),
 		u.connect, u.discon,
 		walk.NewSeparatorAction(),
 		u.reload, logs,
@@ -168,6 +198,7 @@ func (u *ui) send(v ipc.Verb, pending string) {
 		u.mw.Synchronize(func() {
 			u.busy = false
 			if err != nil {
+				u.log.note(time.Now(), levelErr, string(v)+" failed: "+friendly(err))
 				u.show(ipc.Response{}, err)
 				// Only for something the user asked for: a failed poll updates the icon
 				// quietly, but a button that did nothing has to say so.
@@ -175,6 +206,7 @@ func (u *ui) send(v ipc.Verb, pending string) {
 				return
 			}
 			if !resp.OK && resp.Error != "" {
+				u.log.note(time.Now(), levelErr, string(v)+" failed: "+resp.Error)
 				_ = u.ni.ShowError("GameNoLag", resp.Error)
 			}
 			u.show(resp, nil)
@@ -190,6 +222,9 @@ func (u *ui) pollLoop() {
 		resp, err := winpipe.Ask(ctx, ipc.VerbStatus)
 		cancel()
 		u.mw.Synchronize(func() {
+			// Recorded even while a verb is in flight, so the chart's spacing stays
+			// one poll per slot.
+			u.hist.add(sampleFrom(time.Now(), resp, err))
 			if u.busy {
 				return // a verb is in flight; its own answer is fresher than this
 			}
@@ -204,6 +239,9 @@ func (u *ui) setBusy(text string) {
 	_ = u.connect.SetEnabled(false)
 	_ = u.discon.SetEnabled(false)
 	_ = u.reload.SetEnabled(false)
+	if u.win != nil {
+		u.win.refresh()
+	}
 }
 
 // show puts one answer on screen.
@@ -223,6 +261,12 @@ func (u *ui) show(resp ipc.Response, err error) {
 			_ = u.ni.ShowWarning("GameNoLag", resp.Error)
 		}
 		u.shown = next
+	}
+
+	u.view = viewOf(resp, err)
+	u.log.record(time.Now(), resp, err)
+	if u.win != nil {
+		u.win.refresh()
 	}
 }
 

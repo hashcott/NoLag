@@ -194,19 +194,21 @@ psexec -s -i C:\"Program Files"\GameNoLag\gnl-service.exe
 ## The tray icon
 
 The whole interface is: are my packets going through a relay, which one, and how
-fast. That fits in an icon, a tooltip and a short menu, so there is no window —
-a window would only be somewhere to put things nobody asked for.
+fast. That fits in an icon, a tooltip and a short menu. The window described
+below is for the other question — why does this game feel slow — and the tray
+works without it.
 
 The icon is a ring, drawn in code rather than shipped as a resource, because an
 `.ico` needs a resource compiler that does not run on the machine this is built
-on. Filled means connected, hollow means not, so the two are distinct in shape
-as well as colour — many people cannot rely on the colour alone.
+on. Filled means connected, hollow means not, and a bar across the ring means
+connected but faulty, so all three are distinct in shape as well as colour —
+many people cannot rely on the colour alone.
 
 | Icon | Meaning |
 | --- | --- |
 | Grey ring | Not connected, or the service is not running |
 | Green filled ring | Connected; a game's traffic is on the relay when one is running |
-| Red filled ring | Connected but complaining — a relay went away, or routes failed to install |
+| Red ring with a bar across it | Connected but complaining — a relay went away, or routes failed to install |
 
 The menu's first item is the status itself, disabled so it reads as a label. A
 tray menu that makes somebody click something to find out what is going on is a
@@ -227,3 +229,42 @@ between accounts on one machine may each have their own.
 Explorer, because that directory holds this machine's private key. That is the
 right outcome, and it still tells somebody on the phone with support exactly
 where to look.
+
+## The window
+
+Left-click the tray icon for the mini panel, pinned above the taskbar in the
+corner of the work area: RTT with a short sparkline, loss, relay, game, and one
+connect or disconnect button. **+** opens the full window, **×** hides the
+panel, and clicking the icon again hides it too. The full window adds a
+three-minute RTT chart, active routes, and an event log; **−** collapses it back
+to the panel. "Open window" in the menu opens the full window directly.
+
+Both read what the tray's own poll already fetched. Neither asks the service
+anything, so neither widens the pipe. The chart and the event log are built in
+memory from consecutive polls — the service keeps no history — so they start
+empty when the tray starts and are gone when it exits. A gap in the chart means
+a poll with no measurement: not connected, or the service not answering.
+
+Closing or hiding either window never disconnects.
+
+The mini panel is topmost, which puts it above ordinary windows but not above a
+game in exclusive fullscreen. Over a game it is visible only in borderless or
+windowed mode.
+
+### Checking it by hand
+
+None of this can run on the machine it is written on, so after a change to
+`window_windows.go`, on a Windows machine:
+
+- [ ] At 100 % and at 150 % display scaling, the panel sits fully inside the
+      corner above the taskbar, text is not clipped, and the full window's chart
+      and event log fit.
+- [ ] With the taskbar docked on the left or the right, the panel still sits
+      above it rather than under it.
+- [ ] With two monitors, the panel opens on the primary one.
+- [ ] Stop `gnl-service` with the full window open: the tag turns OFF, the
+      buttons disable, the chart breaks, and the log says the service was lost.
+      Start it again: the log says it is answering.
+- [ ] Connect, then close the full window and hide the panel: the tray icon is
+      still filled and the tunnel is still up.
+- [ ] Tab reaches every button, and Enter presses it.
