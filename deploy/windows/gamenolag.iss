@@ -158,12 +158,17 @@ var
   problem: String;
 begin
   Result := True;
+  // A silent install presses Next on every page too. A message box here would
+  // wait for a click that never comes and hang the install for good, so silent
+  // input is left to PrepareToInstall, which fails with an exit code instead.
+  if WizardSilent then
+    exit;
   if CurPageID = AccessPage.ID then
   begin
     problem := CheckAccess;
     if problem <> '' then
     begin
-      MsgBox(problem, mbError, MB_OK);
+      SuppressibleMsgBox(problem, mbError, MB_OK, IDOK);
       Result := False;
     end;
   end;
