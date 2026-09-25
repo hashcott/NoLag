@@ -3,7 +3,6 @@ package control
 import (
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
 	"math/big"
@@ -58,9 +57,4 @@ func NewRelayToken() (string, error) {
 func Hash(secret string) string {
 	sum := sha256.Sum256([]byte(secret))
 	return hex.EncodeToString(sum[:])
-}
-
-// Equal compares two hashes in constant time.
-func Equal(a, b string) bool {
-	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }

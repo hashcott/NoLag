@@ -190,6 +190,11 @@ func (s *server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		Region:         req.Region,
 		Hostname:       req.Hostname,
 	})
+	if errors.Is(err, ErrTooManyRelays) {
+		writeErr(w, http.StatusConflict, "this key already has the maximum number of relays",
+			"remove a relay you no longer run, or ask for a second contributor key")
+		return
+	}
 	if errors.Is(err, ErrUnknownKey) {
 		// Deliberately vague: an attacker probing key space learns only that this
 		// one did not work, not whether it once existed or was revoked.

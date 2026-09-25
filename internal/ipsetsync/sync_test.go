@@ -15,15 +15,15 @@ func TestNormaliseSortsAndDedupes(t *testing.T) {
 }
 
 func TestFingerprintIgnoresOrder(t *testing.T) {
-	a := Fingerprint([]string{"a/32", "b/32"})
-	b := Fingerprint([]string{"b/32", "a/32"})
+	a := Fingerprint([]string{"10.0.0.1/32", "10.0.0.2/32"})
+	b := Fingerprint([]string{"10.0.0.2/32", "10.0.0.1/32"})
 	if a != b {
 		t.Errorf("fingerprints differ for the same set in a different order: %s vs %s", a, b)
 	}
 }
 
 func TestFingerprintChangesWithContent(t *testing.T) {
-	if Fingerprint([]string{"a/32"}) == Fingerprint([]string{"a/32", "b/32"}) {
+	if Fingerprint([]string{"10.0.0.1/32"}) == Fingerprint([]string{"10.0.0.1/32", "10.0.0.2/32"}) {
 		t.Error("fingerprint did not change when a CIDR was added")
 	}
 }
@@ -39,7 +39,7 @@ func TestSyncAppliesOnFirstCall(t *testing.T) {
 		gotCIDRs = sorted
 		return nil
 	}
-	if err := s.Sync([]string{"b/32", "a/32"}, apply); err != nil {
+	if err := s.Sync([]string{"10.0.0.2/32", "10.0.0.1/32"}, apply); err != nil {
 		t.Fatal(err)
 	}
 	if calls != 1 {
@@ -48,8 +48,8 @@ func TestSyncAppliesOnFirstCall(t *testing.T) {
 	if gotSet != "gnl-games" {
 		t.Errorf("set name = %q, want gnl-games", gotSet)
 	}
-	if !reflect.DeepEqual(gotCIDRs, []string{"a/32", "b/32"}) {
-		t.Errorf("apply received %v, want sorted [a/32 b/32]", gotCIDRs)
+	if !reflect.DeepEqual(gotCIDRs, []string{"10.0.0.1/32", "10.0.0.2/32"}) {
+		t.Errorf("apply received %v, want sorted [10.0.0.1/32 10.0.0.2/32]", gotCIDRs)
 	}
 }
 
@@ -58,9 +58,9 @@ func TestSyncSkipsWhenUnchanged(t *testing.T) {
 	calls := 0
 	apply := func(string, []string) error { calls++; return nil }
 
-	s.Sync([]string{"a/32", "b/32"}, apply)
-	s.Sync([]string{"b/32", "a/32"}, apply) // same set, different order
-	s.Sync([]string{"a/32", "b/32"}, apply)
+	s.Sync([]string{"10.0.0.1/32", "10.0.0.2/32"}, apply)
+	s.Sync([]string{"10.0.0.2/32", "10.0.0.1/32"}, apply) // same set, different order
+	s.Sync([]string{"10.0.0.1/32", "10.0.0.2/32"}, apply)
 
 	if calls != 1 {
 		t.Errorf("apply called %d times, want 1: an unchanged list must not be reapplied", calls)
@@ -72,8 +72,8 @@ func TestSyncReappliesWhenChanged(t *testing.T) {
 	calls := 0
 	apply := func(string, []string) error { calls++; return nil }
 
-	s.Sync([]string{"a/32"}, apply)
-	s.Sync([]string{"a/32", "b/32"}, apply)
+	s.Sync([]string{"10.0.0.1/32"}, apply)
+	s.Sync([]string{"10.0.0.1/32", "10.0.0.2/32"}, apply)
 
 	if calls != 2 {
 		t.Errorf("apply called %d times, want 2", calls)
@@ -94,10 +94,10 @@ func TestSyncRetriesAfterFailure(t *testing.T) {
 		return nil
 	}
 
-	if err := s.Sync([]string{"a/32"}, apply); !errors.Is(err, boom) {
+	if err := s.Sync([]string{"10.0.0.1/32"}, apply); !errors.Is(err, boom) {
 		t.Fatalf("err = %v, want the apply error", err)
 	}
-	if err := s.Sync([]string{"a/32"}, apply); err != nil {
+	if err := s.Sync([]string{"10.0.0.1/32"}, apply); err != nil {
 		t.Fatalf("second Sync: %v", err)
 	}
 	if calls != 2 {
@@ -121,5 +121,27 @@ func TestSyncAppliesEmptyList(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Errorf("apply called %d times, want 1", calls)
+	}
+}
+
+// An entry starting with "-" would be read by ipset as an option, and a
+// non-CIDR entry fails the add and aborts the whole rebuild - taking the working
+// part of the allowlist with it and leaving a relay that forwards nothing.
+func TestNormaliseDropsEntriesIpsetWouldMisread(t *testing.T) {
+	got := Normalise([]string{
+		"20.24.48.0/20",
+		"-j DROP",    // would be read as an option
+		"not-a-cidr", // fails the add, aborting the rebuild
+		"10.0.0.1",   // bare address, no prefix
+		"52.139.208.0/20",
+	})
+	want := []string{"20.24.48.0/20", "52.139.208.0/20"}
+	if len(got) != len(want) {
+		t.Fatalf("Normalise = %v, want only the two usable entries", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("Normalise = %v, want %v", got, want)
+		}
 	}
 }

@@ -10,6 +10,7 @@ package ipsetsync
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"net"
 	"os/exec"
 	"sort"
 	"strings"
@@ -17,12 +18,27 @@ import (
 
 // Normalise trims, drops blanks, sorts and dedupes a CIDR list so that two
 // equivalent lists compare equal.
+// usable reports whether an entry is safe to hand to ipset.
+//
+// An entry starting with "-" would be read as an option rather than an address,
+// and one that is not a CIDR at all just fails the add and aborts the rebuild -
+// taking the whole allowlist with it. Dropping the bad entry keeps the rest of
+// the profile working, which matters because the alternative is a relay that
+// forwards nothing.
+func usable(c string) bool {
+	if strings.HasPrefix(c, "-") {
+		return false
+	}
+	_, _, err := net.ParseCIDR(c)
+	return err == nil
+}
+
 func Normalise(cidrs []string) []string {
 	seen := make(map[string]bool, len(cidrs))
 	out := make([]string, 0, len(cidrs))
 	for _, c := range cidrs {
 		c = strings.TrimSpace(c)
-		if c == "" || seen[c] {
+		if c == "" || seen[c] || !usable(c) {
 			continue
 		}
 		seen[c] = true

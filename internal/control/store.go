@@ -18,9 +18,14 @@ import (
 var schemaSQL string
 
 // Errors the HTTP layer turns into status codes.
+// maxRelaysPerKey bounds how much of the subnet pool one contributor can hold.
+// Generous for anyone genuinely donating hardware; far below the 179 the pool has.
+const maxRelaysPerKey = 10
+
 var (
-	ErrUnknownKey   = errors.New("control: unknown contributor key")
-	ErrUnauthorized = errors.New("control: unauthorized")
+	ErrUnknownKey    = errors.New("control: unknown contributor key")
+	ErrTooManyRelays = errors.New("control: this key already has the maximum number of relays")
+	ErrUnauthorized  = errors.New("control: unauthorized")
 )
 
 // trustWindow is how long a newly registered relay carries no user traffic.
@@ -137,6 +142,20 @@ func (s *Store) RegisterRelay(ctx context.Context, in RegisterInput) (RegisterOu
 
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
+		// Cap how many relays one key may enrol. Every new relay consumes a value
+		// from relay_octet_seq, which runs 77..255 and does not recycle, so without
+		// this one key could burn the whole pool in 179 requests and every later
+		// registration by anybody would fail. The rate limiter bounds the speed of
+		// that; this bounds the total.
+		var owned int
+		if err := tx.QueryRow(ctx,
+			`SELECT COUNT(*) FROM relay WHERE key_hash = $1`, keyHash).Scan(&owned); err != nil {
+			return RegisterOutput{}, fmt.Errorf("control: count relays for key: %w", err)
+		}
+		if owned >= maxRelaysPerKey {
+			return RegisterOutput{}, ErrTooManyRelays
+		}
+
 		// No relay with this public key under THIS contributor key. It may still
 		// exist under a different one, in which case this is somebody trying to
 		// adopt another contributor's relay. Refuse it here rather than letting the

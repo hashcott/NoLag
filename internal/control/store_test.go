@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -414,5 +415,37 @@ func TestReachabilityIsScopedToTheOwningContributor(t *testing.T) {
 	err := s.RecordReachability(ctx, stranger, "pk-owned", false, "sabotage")
 	if !errors.Is(err, ErrUnknownKey) {
 		t.Fatalf("err = %v, want ErrUnknownKey: a stranger must not be able to mark a relay unreachable", err)
+	}
+}
+
+// relay_octet_seq runs 77..255 and does not recycle, so without a cap one key
+// could burn the whole pool and every later registration by anybody would fail.
+func TestOneKeyCannotDrainTheSubnetPool(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	key, _ := s.CreateContributorKey(ctx)
+
+	for i := 0; i < maxRelaysPerKey; i++ {
+		if _, err := s.RegisterRelay(ctx, RegisterInput{
+			ContributorKey: key,
+			PublicKey:      fmt.Sprintf("pk-%d", i),
+			Endpoint:       fmt.Sprintf("203.0.113.%d:51820", i+1),
+		}); err != nil {
+			t.Fatalf("relay %d: %v", i, err)
+		}
+	}
+	_, err := s.RegisterRelay(ctx, RegisterInput{
+		ContributorKey: key, PublicKey: "pk-one-too-many", Endpoint: "203.0.113.200:51820",
+	})
+	if !errors.Is(err, ErrTooManyRelays) {
+		t.Fatalf("err = %v, want ErrTooManyRelays after %d relays", err, maxRelaysPerKey)
+	}
+
+	// A different contributor is unaffected.
+	other, _ := s.CreateContributorKey(ctx)
+	if _, err := s.RegisterRelay(ctx, RegisterInput{
+		ContributorKey: other, PublicKey: "pk-other", Endpoint: "203.0.113.250:51820",
+	}); err != nil {
+		t.Errorf("an unrelated contributor was blocked by somebody else's cap: %v", err)
 	}
 }

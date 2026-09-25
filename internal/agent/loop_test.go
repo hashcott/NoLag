@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"gamenolag/internal/api"
 	"gamenolag/internal/ipsetsync"
@@ -149,5 +150,38 @@ func TestRunOncePeersSucceedEvenIfIPSetFails(t *testing.T) {
 	peers, _ := dev.Peers("wg0")
 	if len(peers) != 1 {
 		t.Errorf("device holds %d peers, want 1: an ipset failure must not block peer reconcile", len(peers))
+	}
+}
+
+// PollSecs was served by the control plane and ignored, so there was no way to
+// back a fleet off during an incident - exactly when agents polling in lockstep
+// are least welcome.
+func TestRunOnceReportsTheRequestedInterval(t *testing.T) {
+	dev := wgsync.NewFakeDevice()
+	cp := &fakeCP{resp: api.SyncResponse{PollSecs: 45}}
+
+	next, err := RunOnceWithInterval(context.Background(), dev, cp, ipsetsync.New("s"), "wg0",
+		func(string, []string) error { return nil }, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next != 45*time.Second {
+		t.Errorf("interval = %v, want 45s as the control plane asked", next)
+	}
+}
+
+// A failed sync must not be read as "poll immediately", or every agent would
+// hammer a control plane that is already in trouble.
+func TestFailedSyncRequestsNoIntervalChange(t *testing.T) {
+	dev := wgsync.NewFakeDevice()
+	cp := &fakeCP{err: errors.New("connection refused")}
+
+	next, err := RunOnceWithInterval(context.Background(), dev, cp, ipsetsync.New("s"), "wg0",
+		func(string, []string) error { return nil }, nil)
+	if err == nil {
+		t.Fatal("want the sync error")
+	}
+	if next != 0 {
+		t.Errorf("interval = %v after a failed sync, want 0 so the caller keeps its own", next)
 	}
 }

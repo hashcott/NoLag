@@ -25,17 +25,44 @@ RATE_BURST="256kb"    # four seconds at the sustained rate
 REGION=""
 UNINSTALL=0
 
+need() { # need <flag> <value>
+  [[ -n "${2:-}" ]] || { echo "$1 requires a value" >&2; exit 2; }
+}
+
+usage() {
+  cat <<USAGE
+Install a GameNoLag relay on this machine.
+
+  sudo $0 --key GNL-XXXX-XXXX-XXXX-XXXX --control https://cp.example.com [options]
+  sudo $0 --uninstall
+
+Required:
+  --key KEY          contributor key, from the project
+  --control URL      control plane base URL
+
+Options:
+  --region NAME      free-text region label, e.g. sgp
+  --endpoint IP      public address players dial; needed when the provider NATs
+                     this VPS, because the address on the interface is private
+  --port N           WireGuard UDP port (default 51820)
+  --iface NAME       interface name (default wg0)
+  --rate RATE        per-session cap each way (default 64kb/s)
+  --uninstall        remove everything this script installed
+  -h, --help         this text
+USAGE
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --key)       KEY="$2";     shift 2 ;;
-    --control)   CONTROL="$2"; shift 2 ;;
-    --iface)     IFACE="$2";   shift 2 ;;
-    --port)      PORT="$2";    shift 2 ;;
-    --region)    REGION="$2";  shift 2 ;;
-    --endpoint)  ENDPOINT_IP="$2"; shift 2 ;;
-    --rate)      RATE_LIMIT="$2"; shift 2 ;;
+    --key)       need --key "${2:-}"; KEY="$2";     shift 2 ;;
+    --control)   need --control "${2:-}"; CONTROL="$2"; shift 2 ;;
+    --iface)     need --iface "${2:-}"; IFACE="$2";   shift 2 ;;
+    --port)      need --port "${2:-}"; PORT="$2";    shift 2 ;;
+    --region)    need --region "${2:-}"; REGION="$2";  shift 2 ;;
+    --endpoint)  need --endpoint "${2:-}"; ENDPOINT_IP="$2"; shift 2 ;;
+    --rate)      need --rate "${2:-}"; RATE_LIMIT="$2"; shift 2 ;;
     --uninstall) UNINSTALL=1;  shift ;;
-    -h|--help)   sed -n '2,20p' "$0"; exit 0 ;;
+    -h|--help)   usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -226,20 +253,33 @@ echo "    public key: $PUBKEY"
 
 # ---------------------------------------------------------------- register
 echo "==> Registering with $CONTROL"
-REG="$(curl -fsS -X POST "$CONTROL/v1/relay/register" \
-  -H 'Content-Type: application/json' \
-  -d "{\"contributor_key\":\"$KEY\",\"public_key\":\"$PUBKEY\",\"endpoint\":\"$PUBIP:$PORT\",\"region\":\"$REGION\",\"hostname\":\"$(hostname)\"}")" || {
-    echo "!! Registration failed. Check --key and that $CONTROL is reachable from here." >&2
-    exit 1
-  }
-
+# Build the body with a here-doc and a quoting helper rather than by
+# interpolation: a hostname or region containing a quote produced malformed JSON
+# and a generic "registration failed" that named the wrong cause.
+jsonesc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+REG_BODY="$(cat <<JSONEOF
+{"contributor_key":"$(jsonesc "$KEY")","public_key":"$(jsonesc "$PUBKEY")","endpoint":"$(jsonesc "$PUBIP:$PORT")","region":"$(jsonesc "$REGION")","hostname":"$(jsonesc "$(hostname)")"}
+JSONEOF
+)"
+# -sS not -fsS: -f discards the body, and the control plane's hint is in the body.
+REG_HTTP="$(curl -sS -o /tmp/gnl-reg.$$ -w '%{http_code}' -X POST "$CONTROL/v1/relay/register" \
+  -H 'Content-Type: application/json' -d "$REG_BODY")" || REG_HTTP="000"
+REG="$(cat /tmp/gnl-reg.$$ 2>/dev/null)"; rm -f /tmp/gnl-reg.$$
+if [[ "$REG_HTTP" != "200" ]]; then
+  echo "!! Registration failed (HTTP $REG_HTTP)." >&2
+  # Show what the control plane actually said; it writes a hint for exactly this.
+  echo "$REG" | sed -n 's/.*"error":"\([^"]*\)".*/   \1/p' >&2
+  echo "$REG" | sed -n 's/.*"hint":"\([^"]*\)".*/   hint: \1/p' >&2
+  [[ "$REG_HTTP" == "000" ]] && echo "   Could not reach $CONTROL at all." >&2
+  exit 1
+fi
 jsonfield() { echo "$REG" | sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p"; }
 RELAY_ID="$(jsonfield relay_id)"
 RELAY_TOKEN="$(jsonfield relay_token)"
 INNER_IP="$(jsonfield inner_ip)"
 INNER_SUBNET="$(jsonfield inner_subnet)"
 
-if [[ -z "$RELAY_TOKEN" || -z "$INNER_IP" ]]; then
+if [[ -z "$RELAY_TOKEN" || -z "$INNER_IP" || -z "$INNER_SUBNET" || -z "$RELAY_ID" ]]; then
   echo "!! The control plane's reply was not what was expected:" >&2
   echo "$REG" >&2
   exit 1
@@ -392,6 +432,25 @@ if [[ ! -f ./gnl-agent ]]; then
   echo "   checksum, and run this again." >&2
   exit 1
 fi
+# Verify before installing. The script's own error text tells the contributor to
+# check the checksum; it is the thing that then runs as root forever, so the
+# script should not ask somebody else to do what it can do itself.
+if [[ -r ./gnl-agent.sha256 ]]; then
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum -c ./gnl-agent.sha256 >/dev/null || {
+      echo "!! ./gnl-agent does not match ./gnl-agent.sha256. Not installing it." >&2
+      exit 1; }
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 -c ./gnl-agent.sha256 >/dev/null || {
+      echo "!! ./gnl-agent does not match ./gnl-agent.sha256. Not installing it." >&2
+      exit 1; }
+  fi
+  echo "==> gnl-agent checksum verified"
+else
+  echo "!! No ./gnl-agent.sha256 alongside the binary, so it was NOT verified." >&2
+  echo "   Download it from the same release and re-run to check what you are" >&2
+  echo "   about to run as root." >&2
+fi
 install -m 0755 ./gnl-agent /usr/local/bin/gnl-agent
 
 # The interface is owned by its own oneshot unit so it is recreated at every
@@ -432,8 +491,9 @@ RestartSec=5
 # keep trying for as long as the machine is up: a relay that stopped retrying
 # because of a transient failure is a relay nobody notices is gone.
 StartLimitIntervalSec=0
-# Needs root for wgctrl, iptables and ipset; CAP_NET_ADMIN is the capability
-# that actually matters. The rest is taken away.
+# Runs as root: wgctrl, iptables and ipset all need CAP_NET_ADMIN, and this unit
+# does not drop privileges. NoNewPrivileges/ProtectHome/PrivateTmp are the only
+# restrictions here - do not read them as a sandbox.
 NoNewPrivileges=yes
 ProtectHome=yes
 PrivateTmp=yes

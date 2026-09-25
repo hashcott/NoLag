@@ -48,9 +48,10 @@ cannot create TUN devices at all, and the installer stops with that message
 rather than failing later somewhere confusing.
 
 ```bash
-wget https://.../relay-v1.sh https://.../relay-v1.sh.sha256 https://.../gnl-agent
+wget https://.../relay-v1.sh https://.../relay-v1.sh.sha256 \
+     https://.../gnl-agent https://.../gnl-agent.sha256
 sha256sum -c relay-v1.sh.sha256
-less relay-v1.sh                       # 200 lines; read it, it runs as root
+less relay-v1.sh                       # 524 lines; read it, it runs as root
 sudo ./relay-v1.sh --key GNL-XXXX-XXXX-XXXX-XXXX \
                    --control https://cp.example.com \
                    --region sgp
@@ -168,6 +169,9 @@ works end to end. On the control plane's database:
 ```sql
 INSERT INTO device (id, key_hash, wg_pubkey)
 VALUES ('test-device-1', '<hash of the contributor key>', '<a WireGuard public key>');
+-- The hash is SHA-256 of the key exactly as printed, with no trailing newline:
+--   printf %s 'GNL-XXXX-XXXX-XXXX-XXXX' | sha256sum
+-- echo would add a newline and give a different, wrong hash.
 
 INSERT INTO peer_binding (device_id, relay_id, inner_ip)
 VALUES ('test-device-1', '<relay id>', '10.77.0.5/32');

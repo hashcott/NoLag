@@ -80,15 +80,3 @@ func TestHashDoesNotReturnTheSecret(t *testing.T) {
 		t.Error("Hash output contains the plaintext secret")
 	}
 }
-
-func TestEqual(t *testing.T) {
-	if !Equal("abc", "abc") {
-		t.Error("Equal returned false for identical strings")
-	}
-	if Equal("abc", "abd") {
-		t.Error("Equal returned true for different strings")
-	}
-	if Equal("abc", "") {
-		t.Error("Equal returned true against an empty string")
-	}
-}

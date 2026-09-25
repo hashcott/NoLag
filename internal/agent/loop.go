@@ -47,6 +47,8 @@ type Syncer interface {
 // Peers and the allowlist are applied independently and their errors are
 // joined. A failure in one must not block the other: a stale allowlist is worse
 // than a fresh one, but nobody being able to connect is worse than both.
+// RunOnce performs one reconcile pass. It returns only an error; callers that
+// want the interval the control plane asked for use RunOnceWithInterval.
 func RunOnce(
 	ctx context.Context,
 	dev wgsync.Device,
@@ -56,6 +58,19 @@ func RunOnce(
 	applyIPSet func(setName string, sorted []string) error,
 	reassertFirewall func() error,
 ) error {
+	_, err := RunOnceWithInterval(ctx, dev, cp, sets, iface, applyIPSet, reassertFirewall)
+	return err
+}
+
+func RunOnceWithInterval(
+	ctx context.Context,
+	dev wgsync.Device,
+	cp Syncer,
+	sets *ipsetsync.Syncer,
+	iface string,
+	applyIPSet func(setName string, sorted []string) error,
+	reassertFirewall func() error,
+) (time.Duration, error) {
 	st, err := dev.Stats(iface)
 	if err != nil {
 		// Report what we can rather than skipping the sync: the control plane
@@ -77,10 +92,25 @@ func RunOnce(
 		// Return without touching anything. The peers already on the device stay
 		// exactly as they are, so a control plane outage never disconnects a
 		// player who is mid-match.
-		return fmt.Errorf("agent: sync with control plane: %w", err)
+		return 0, fmt.Errorf("agent: sync with control plane: %w", err)
 	}
 
 	var errs []error
+
+	// Validate before the kernel sees them. The control plane validates too, but
+	// this is the component whose auditability the trust model rests on: a
+	// contributor can read it, and it should not hand the kernel whatever arrived
+	// over the network on the strength of somebody else's check. A peer with a
+	// wide AllowedIPs would receive other clients' return traffic.
+	valid := make([]api.Peer, 0, len(resp.Peers))
+	for _, pr := range resp.Peers {
+		if err := pr.Validate(); err != nil {
+			log.Printf("agent: refusing peer from the control plane: %v", err)
+			continue
+		}
+		valid = append(valid, pr)
+	}
+	resp.Peers = valid
 
 	current, err := dev.Peers(iface)
 	if err != nil {
@@ -109,7 +139,7 @@ func RunOnce(
 		}
 	}
 
-	return errors.Join(errs...)
+	return time.Duration(resp.PollSecs) * time.Second, errors.Join(errs...)
 }
 
 // Loop runs RunOnce on a timer until ctx is cancelled.
@@ -122,18 +152,29 @@ func Loop(
 	reassertFirewall func() error,
 ) {
 	sets := ipsetsync.New(cfg.SetName)
-	ticker := time.NewTicker(cfg.Poll)
-	defer ticker.Stop()
+	interval := cfg.Poll
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
 
 	for {
-		if err := RunOnce(ctx, dev, cp, sets, cfg.Iface, applyIPSet, reassertFirewall); err != nil {
+		next, err := RunOnceWithInterval(ctx, dev, cp, sets, cfg.Iface, applyIPSet, reassertFirewall)
+		if err != nil {
 			log.Printf("agent: %v", err)
+		}
+		// Honour the interval the control plane asked for. It was being served and
+		// ignored, so there was no way to back agents off during an incident -
+		// exactly when a fleet polling in lockstep is least welcome. A failed sync
+		// leaves the interval alone rather than resetting it.
+		if next > 0 && next != interval {
+			log.Printf("agent: poll interval now %s, as asked by the control plane", next)
+			interval = next
 		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-timer.C:
 		}
+		timer.Reset(interval)
 	}
 }
 
