@@ -1,0 +1,140 @@
+# P1 Runbook: bringing up the control plane and the first relay
+
+Prerequisite: `gnl-analyze` from P0 has returned GO, and you know which provider
+won. See `docs/superpowers/plans/2026-09-14-p0-route-measurement.md`.
+
+## 1. Control plane
+
+Needs Postgres, a public HTTPS endpoint, and nothing else. It is not on the data
+path, so its latency to Vietnam does not matter.
+
+```bash
+createdb gamenolag
+export GNL_DSN='postgres://user:pass@localhost:5432/gamenolag'
+gnl-control -listen 127.0.0.1:8080
+```
+
+The schema is applied on start; there is no separate migration step.
+
+Put TLS in front of it — a reverse proxy is fine. **Relay tokens are bearer
+tokens.** Over plain HTTP, anyone on the path can take one and impersonate that
+relay to the control plane.
+
+## 2. Mint a contributor key
+
+```bash
+gnl-control -mint-key
+```
+
+Prints the key once. Only its hash is stored, so it cannot be recovered. Give it
+to the contributor over a channel you trust.
+
+## 3. The contributor installs the relay
+
+They need a **KVM** VPS with kernel 5.6 or newer. Not OpenVZ and not LXC: those
+cannot create TUN devices at all, and the installer stops with that message
+rather than failing later somewhere confusing.
+
+```bash
+wget https://.../relay-v1.sh https://.../relay-v1.sh.sha256 https://.../gnl-agent
+sha256sum -c relay-v1.sh.sha256
+less relay-v1.sh                       # 200 lines; read it, it runs as root
+sudo ./relay-v1.sh --key GNL-XXXX-XXXX-XXXX-XXXX \
+                   --control https://cp.example.com \
+                   --region sgp
+```
+
+If the installer refuses because the WAN interface carries a private address,
+the provider is NATing this VPS and the address on the card is not the address
+players dial. Pass the public one explicitly and re-run:
+
+```bash
+sudo ./relay-v1.sh --key GNL-XXXX-XXXX-XXXX-XXXX \
+                   --control https://cp.example.com \
+                   --region sgp \
+                   --endpoint <public-ip>
+```
+
+Registering a private address is not an error the relay can detect later: it
+simply never receives a handshake, and nothing in its own logs says why.
+
+Then, in the VPS provider's control panel, **open UDP 51820 in the security
+group**. The installer says this at the end because it is the one thing it
+cannot check from inside the machine, and it is the most common reason a relay
+looks healthy locally and is unreachable from everywhere else.
+
+## 4. Verify from outside
+
+From a different machine — not the relay:
+
+```bash
+sudo gnl-relaycheck -endpoint <relay-ip>:51820 -pubkey <relay public key>
+```
+
+The public key is printed by the installer, and on the relay is:
+
+```bash
+wg pubkey < /etc/gnl/relay.key
+```
+
+`REACHABLE` means the relay is genuinely serviceable. `NOT REACHABLE` prints the
+causes in order of likelihood, starting with the provider's security group.
+
+## 5. Bind a test device and watch it arrive
+
+There is no client yet — that is P2 — so bind a peer by hand to prove the loop
+works end to end. On the control plane's database:
+
+```sql
+INSERT INTO device (id, key_hash, wg_pubkey)
+VALUES ('test-device-1', '<hash of the contributor key>', '<a WireGuard public key>');
+
+INSERT INTO peer_binding (device_id, relay_id, inner_ip)
+VALUES ('test-device-1', '<relay id>', '10.77.0.5/32');
+```
+
+Generate that public key anywhere with `wg genkey | wg pubkey`.
+
+Within one poll interval — ten seconds — the peer appears on the relay:
+
+```bash
+wg show wg0
+journalctl -u gnl-agent -n 20
+```
+
+The log line reads `agent: peers +1 ~0 -0 (now 1)`.
+
+Delete the `peer_binding` row and it disappears just as fast. That is revocation:
+no token expiry to wait out, no key rotation, the peer is simply gone from the
+kernel.
+
+## 6. Publish a game profile
+
+Until a profile exists, the allowlist is empty and the relay forwards nothing.
+That is the correct state, not a bug — a relay with no profile should carry no
+traffic.
+
+```sql
+INSERT INTO game_profile (version, cidrs)
+VALUES (1, ARRAY['20.24.48.0/20', '52.139.208.0/20']);
+```
+
+On the relay, within one poll:
+
+```bash
+ipset list gnl-games
+```
+
+The real profile comes from P4. These two ranges are illustrative and are enough
+to prove the plumbing.
+
+## What is deliberately not here
+
+- **Client.** P2. Until then, peers are bound by hand as in step 5.
+- **Automatic relay verification.** `gnl-relaycheck` is run by a person. Wiring
+  it into the control plane on a schedule is worth doing once there are more
+  relays than one person wants to check.
+- **Contributor dashboard.** P6.
+- **`trusted_after` enforcement.** The column is populated at registration, but
+  nothing reads it yet because there is no client fetching a relay list. That
+  lands with `/v1/session` in P3.
