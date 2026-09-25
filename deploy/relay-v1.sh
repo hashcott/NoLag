@@ -20,6 +20,8 @@ CONTROL=""
 IFACE="wg0"
 PORT="51820"
 SETNAME="gnl-games"
+RATE_LIMIT="64kb/s"   # per session, per direction; kb here is 1024 bytes
+RATE_BURST="256kb"    # four seconds at the sustained rate
 REGION=""
 UNINSTALL=0
 
@@ -31,6 +33,7 @@ while [[ $# -gt 0 ]]; do
     --port)      PORT="$2";    shift 2 ;;
     --region)    REGION="$2";  shift 2 ;;
     --endpoint)  ENDPOINT_IP="$2"; shift 2 ;;
+    --rate)      RATE_LIMIT="$2"; shift 2 ;;
     --uninstall) UNINSTALL=1;  shift ;;
     -h|--help)   sed -n '2,20p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
@@ -81,6 +84,14 @@ if [[ $UNINSTALL -eq 1 ]]; then
   ip link del "$IFACE" 2>/dev/null || true
 
   if [[ -n "${INNER_SUBNET:-}" ]]; then
+    iptables -D FORWARD -s "$INNER_SUBNET" -m hashlimit \
+      --hashlimit-above "${RATE_LIMIT:-64kb/s}" --hashlimit-burst "${RATE_BURST:-256kb}" \
+      --hashlimit-mode srcip --hashlimit-name gnl-up \
+      --hashlimit-htable-expire 60000 -j DROP 2>/dev/null || true
+    iptables -D FORWARD -d "$INNER_SUBNET" -m hashlimit \
+      --hashlimit-above "${RATE_LIMIT:-64kb/s}" --hashlimit-burst "${RATE_BURST:-256kb}" \
+      --hashlimit-mode dstip --hashlimit-name gnl-down \
+      --hashlimit-htable-expire 60000 -j DROP 2>/dev/null || true
     iptables -D FORWARD -s "$INNER_SUBNET" -m set --match-set "$SETNAME" dst -j ACCEPT 2>/dev/null || true
     iptables -D FORWARD -d "$INNER_SUBNET" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
     iptables -t nat -D POSTROUTING -s "$INNER_SUBNET" -o "$WAN" -j MASQUERADE 2>/dev/null || true
@@ -134,6 +145,17 @@ if (( KMAJ < 5 || (KMAJ == 5 && KMIN < 6) )); then
   exit 1
 fi
 echo "    kernel $KVER"
+
+# The per-session cap uses xt_hashlimit. Check it here rather than discovering it
+# when the rule is added, half way through configuring the firewall.
+if ! modprobe xt_hashlimit 2>/dev/null && ! lsmod | grep -q '^xt_hashlimit'; then
+  echo "!! The xt_hashlimit kernel module will not load." >&2
+  echo "   It enforces the per-session bandwidth cap that keeps one player from" >&2
+  echo "   using up your monthly quota. Install your distro's extra netfilter" >&2
+  echo "   modules (Debian/Ubuntu: linux-modules-extra-\$(uname -r)) and re-run." >&2
+  exit 1
+fi
+echo "    xt_hashlimit available"
 
 if ! modprobe wireguard 2>/dev/null && ! lsmod | grep -q '^wireguard'; then
   echo "!! The wireguard kernel module will not load." >&2
@@ -288,6 +310,28 @@ add_rule() { # add_rule <table> <chain> <rule...>
 PREV_FORWARD_POLICY="$(iptables -S FORWARD 2>/dev/null | awk '/^-P FORWARD/{print $3; exit}')"
 PREV_FORWARD_POLICY="${PREV_FORWARD_POLICY:-ACCEPT}"
 iptables -P FORWARD DROP
+# Per-session bandwidth cap, inserted BEFORE the ACCEPTs so excess is dropped
+# rather than forwarded. Spec 6.5 promises contributors that one player cannot
+# burn their monthly quota; this is that promise.
+#
+# hashlimit rather than tc classes: it hashes on the inner address itself, so one
+# rule covers every peer and there is no per-peer state for the agent to keep in
+# step. A real game session runs about 10 KB/s, so the cap sits roughly six times
+# above normal use and only bites on abuse.
+#
+# Note what this is NOT: a rate cap is not a quota cap. Sustained flat-out use
+# still moves real volume over a month. What actually bounds the damage is this
+# cap together with the game-CIDR allowlist, which means only game traffic can
+# flow at all.
+add_rule filter FORWARD -s "$INNER_SUBNET" -m hashlimit \
+  --hashlimit-above "$RATE_LIMIT" --hashlimit-burst "$RATE_BURST" \
+  --hashlimit-mode srcip --hashlimit-name gnl-up \
+  --hashlimit-htable-expire 60000 -j DROP
+add_rule filter FORWARD -d "$INNER_SUBNET" -m hashlimit \
+  --hashlimit-above "$RATE_LIMIT" --hashlimit-burst "$RATE_BURST" \
+  --hashlimit-mode dstip --hashlimit-name gnl-down \
+  --hashlimit-htable-expire 60000 -j DROP
+
 add_rule filter FORWARD -s "$INNER_SUBNET" -m set --match-set "$SETNAME" dst -j ACCEPT
 add_rule filter FORWARD -d "$INNER_SUBNET" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 add_rule nat POSTROUTING -s "$INNER_SUBNET" -o "$WAN" -j MASQUERADE
@@ -306,6 +350,8 @@ PORT=$PORT
 IFACE=$IFACE
 INNER_IP=$INNER_IP
 SETNAME=$SETNAME
+RATE_LIMIT=$RATE_LIMIT
+RATE_BURST=$RATE_BURST
 PREV_FORWARD_POLICY=$PREV_FORWARD_POLICY
 STATEEOF
 chmod 0600 /etc/gnl/relay.state

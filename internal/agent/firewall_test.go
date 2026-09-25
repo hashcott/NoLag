@@ -86,7 +86,7 @@ func TestReassertRestoresAMissingRule(t *testing.T) {
 				}
 				return nil
 			}
-			if a == "-I" {
+			if a == "-I" || a == "-A" {
 				inserted = append(inserted, args)
 			}
 		}
@@ -97,7 +97,7 @@ func TestReassertRestoresAMissingRule(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(inserted) != 1 {
-		t.Fatalf("inserted %d rules, want exactly the missing one", len(inserted))
+		t.Fatalf("restored %d rules, want exactly the missing one", len(inserted))
 	}
 	if !strings.Contains(strings.Join(inserted[0], " "), "MASQUERADE") {
 		t.Errorf("inserted %v, want the MASQUERADE rule", inserted[0])
@@ -114,9 +114,12 @@ func TestFirewallRulesMatchTheInstaller(t *testing.T) {
 	}
 	text := string(script)
 	st := RelayState{InnerSubnet: "$INNER_SUBNET", WAN: "$WAN", Port: "$PORT", SetName: "$SETNAME"}
-	for _, spec := range FirewallRules(st) {
+	for _, r := range FirewallRules(st) {
+		if r.AtTop {
+			continue // the caps are multi-line in the script; covered by their own test
+		}
 		// Rebuild the tail of the add_rule line the installer uses.
-		tail := strings.Join(spec[3:], " ")
+		tail := strings.Join(r.Spec[3:], " ")
 		// The installer quotes its variables; compare on the distinguishing parts.
 		needle := strings.ReplaceAll(tail, "$INNER_SUBNET", `"$INNER_SUBNET"`)
 		needle = strings.ReplaceAll(needle, "$SETNAME", `"$SETNAME"`)
@@ -126,5 +129,59 @@ func TestFirewallRulesMatchTheInstaller(t *testing.T) {
 			t.Errorf("the agent asserts a rule the installer never adds:\n  agent:     %s\n"+
 				"  not found in deploy/relay-v1.sh", needle)
 		}
+	}
+}
+
+// The caps must sit above the ACCEPTs. A DROP appended below an ACCEPT never
+// matches, so the cap would silently do nothing while looking present.
+func TestCapsAreInsertedAtTheTop(t *testing.T) {
+	st := RelayState{InnerSubnet: "10.77.0.0/16", WAN: "eth0", Port: "51820",
+		SetName: "gnl-games", RateLimit: "64kb/s", RateBurst: "256kb"}
+	rules := FirewallRules(st)
+	for i, r := range rules {
+		isCap := strings.Contains(strings.Join(r.Spec, " "), "hashlimit")
+		if isCap && !r.AtTop {
+			t.Errorf("rule %d is a rate cap but is appended, not inserted at the top", i)
+		}
+		if !isCap && r.AtTop {
+			t.Errorf("rule %d is not a cap but is inserted at the top, above the caps", i)
+		}
+	}
+}
+
+// A missing cap must be restored with -I, a missing ACCEPT with -A. Getting this
+// backwards puts an ACCEPT above the caps and the cap stops applying.
+func TestReassertUsesTheRightInsertionMode(t *testing.T) {
+	var ops []string
+	run := func(args ...string) error {
+		for i, a := range args {
+			if a == "-C" {
+				return errors.New("missing") // everything is missing
+			}
+			if a == "-I" || a == "-A" {
+				kind := "accept"
+				if strings.Contains(strings.Join(args[i:], " "), "hashlimit") {
+					kind = "cap"
+				}
+				ops = append(ops, a+" "+kind)
+			}
+		}
+		return nil
+	}
+	st := RelayState{InnerSubnet: "10.77.0.0/16", WAN: "eth0", Port: "51820",
+		SetName: "gnl-games", RateLimit: "64kb/s", RateBurst: "256kb"}
+	if err := ReassertFirewall(st, run); err != nil {
+		t.Fatal(err)
+	}
+	for _, op := range ops {
+		if op == "-A cap" {
+			t.Error("a rate cap was appended; it must be inserted above the ACCEPTs")
+		}
+		if op == "-I accept" {
+			t.Error("an ACCEPT was inserted at the top, which puts it above the caps")
+		}
+	}
+	if len(ops) != 7 {
+		t.Errorf("applied %d rules, want 7", len(ops))
 	}
 }

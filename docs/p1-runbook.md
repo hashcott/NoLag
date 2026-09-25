@@ -81,6 +81,28 @@ the relay needs the installer run again. The control plane marks a relay `down`
 after five minutes without a sync, so a relay in this state stops being handed to
 players rather than silently swallowing their traffic.
 
+### What protects your bandwidth
+
+Each session is capped at **64 KB/s per direction**, enforced on the relay by a
+per-address `hashlimit` rule. A real game session uses about 10 KB/s, so the cap
+sits roughly six times above normal play and only bites on abuse. Change it with
+`--rate` at install time if you want a different ceiling.
+
+Be clear about what this is: a **rate** cap, not a quota. It bounds how fast any
+one player can move data, not how much they move in a month. What actually keeps
+the total small is the cap together with the egress allowlist — only traffic to
+the game address ranges is forwarded at all, so there is nothing else to use the
+relay for.
+
+Check the cap is live and see what it has dropped:
+
+```bash
+iptables -L FORWARD -n -v --line-numbers | head
+```
+
+The two `hashlimit` DROP rules must appear **above** the ACCEPT rules. Below
+them they would never match, and the cap would be present but inert.
+
 ## 4. Verify from outside
 
 From a different machine — not the relay:
