@@ -20,6 +20,11 @@ type fakeBackend struct {
 	peers       []api.Peer
 	cidrs       []string
 	desiredErr  error
+	reachKey    string
+	reachPub    string
+	reachOK     bool
+	reachDetail string
+	reachErr    error
 }
 
 func (f *fakeBackend) RegisterRelay(context.Context, RegisterInput) (RegisterOutput, error) {
@@ -31,6 +36,10 @@ func (f *fakeBackend) AuthenticateRelay(context.Context, string) (string, error)
 func (f *fakeBackend) RecordStatus(_ context.Context, _ string, st api.RelayStatus) error {
 	f.statusSeen = st
 	return nil
+}
+func (f *fakeBackend) RecordReachability(_ context.Context, key, pubkey string, ok bool, detail string) error {
+	f.reachKey, f.reachPub, f.reachOK, f.reachDetail = key, pubkey, ok, detail
+	return f.reachErr
 }
 func (f *fakeBackend) DesiredState(context.Context, string) ([]api.Peer, []string, error) {
 	return f.peers, f.cidrs, f.desiredErr
@@ -170,5 +179,43 @@ func TestHealthz(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Errorf("status = %d, want 200", rec.Code)
+	}
+}
+
+func TestReachabilityRecordsTheVerdict(t *testing.T) {
+	b := &fakeBackend{}
+	rec := post(t, NewServer(b, 10), "/v1/relay/reachability", "", api.ReachabilityReport{
+		ContributorKey: "GNL-AAAA-BBBB-CCCC-DDDD",
+		RelayPublicKey: "relay-pk", Reachable: true,
+	})
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body %s", rec.Code, rec.Body)
+	}
+	if b.reachPub != "relay-pk" || !b.reachOK {
+		t.Errorf("backend saw pubkey=%q ok=%v", b.reachPub, b.reachOK)
+	}
+}
+
+// A contributor may report on their own relays and nobody else's. Without that,
+// anyone could mark a stranger's relay unreachable and take it out of service.
+func TestReachabilityRejectsARelayTheKeyDoesNotOwn(t *testing.T) {
+	b := &fakeBackend{reachErr: ErrUnknownKey}
+	rec := post(t, NewServer(b, 10), "/v1/relay/reachability", "", api.ReachabilityReport{
+		ContributorKey: "GNL-ZZZZ-ZZZZ-ZZZZ-ZZZZ", RelayPublicKey: "someone-elses", Reachable: false,
+	})
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", rec.Code)
+	}
+}
+
+func TestReachabilityRequiresBothFields(t *testing.T) {
+	for _, r := range []api.ReachabilityReport{
+		{RelayPublicKey: "pk"},
+		{ContributorKey: "GNL-A"},
+	} {
+		rec := post(t, NewServer(&fakeBackend{}, 10), "/v1/relay/reachability", "", r)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("status = %d for %+v, want 400", rec.Code, r)
+		}
 	}
 }

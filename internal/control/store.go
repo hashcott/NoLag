@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"gamenolag/internal/api"
@@ -231,14 +232,67 @@ func (s *Store) AuthenticateRelay(ctx context.Context, token string) (string, er
 // A relay that syncs has proved it can reach us, which is not the same as us
 // being able to reach it; cmd/gnl-relaycheck answers that second question.
 func (s *Store) RecordStatus(ctx context.Context, relayID string, st api.RelayStatus) error {
+	// Deliberately does NOT set status = 'up'. A sync proves the relay can reach
+	// us; it proves nothing about whether a player can reach the relay, because
+	// the provider's security group sits in front of its UDP port and is invisible
+	// from inside the machine. Only an external handshake settles that, and it
+	// arrives through RecordReachability. A relay that has never been verified
+	// stays 'pending' however faithfully it syncs.
 	_, err := s.pool.Exec(ctx,
 		`UPDATE relay
-		    SET last_seen = now(), status = 'up',
-		        active_peers = $2, rx_bytes = $3, tx_bytes = $4
+		    SET last_seen = now(),
+		        active_peers = $2, rx_bytes = $3, tx_bytes = $4,
+		        status = CASE
+		                   WHEN reachable_at IS NOT NULL THEN 'up'
+		                   ELSE status
+		                 END
 		  WHERE id = $1`,
 		relayID, st.ActivePeers, st.RxBytes, st.TxBytes)
 	if err != nil {
 		return fmt.Errorf("control: record status: %w", err)
+	}
+	return nil
+}
+
+// RecordReachability stores the verdict of an external reachability check.
+//
+// This is the only thing that can move a relay to 'up'. gnl-relaycheck runs from
+// somewhere other than the relay and attempts a real WireGuard handshake, which
+// is the one test that covers the provider's security group as well as the host
+// firewall - and a closed security group is the most common reason a relay looks
+// healthy locally and is unreachable from everywhere else.
+//
+// Scoped by contributor key: a contributor may report on their own relays and
+// nobody else's. Without that, anyone could mark a stranger's relay unreachable
+// and take it out of service.
+func (s *Store) RecordReachability(ctx context.Context, contributorKey, relayPubKey string, ok bool, detail string) error {
+	keyHash := Hash(contributorKey)
+
+	var tag pgconn.CommandTag
+	var err error
+	if ok {
+		tag, err = s.pool.Exec(ctx,
+			`UPDATE relay
+			    SET reachable_at = now(), status = 'up', unreachable_detail = ''
+			  WHERE wg_pubkey = $1 AND key_hash = $2`,
+			relayPubKey, keyHash)
+	} else {
+		// Not cleared: a relay that was reachable and now is not keeps its
+		// reachable_at, so the record shows it worked once. Status says it does not
+		// work now, which is what selection needs to read.
+		tag, err = s.pool.Exec(ctx,
+			`UPDATE relay
+			    SET status = 'unreachable', unreachable_detail = $3
+			  WHERE wg_pubkey = $1 AND key_hash = $2`,
+			relayPubKey, keyHash, detail)
+	}
+	if err != nil {
+		return fmt.Errorf("control: record reachability: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		// Same vague answer an unknown key gets, so this is not an oracle for which
+		// public keys are enrolled under which contributor.
+		return ErrUnknownKey
 	}
 	return nil
 }

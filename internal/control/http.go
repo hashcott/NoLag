@@ -21,6 +21,7 @@ type Backend interface {
 	RegisterRelay(ctx context.Context, in RegisterInput) (RegisterOutput, error)
 	AuthenticateRelay(ctx context.Context, token string) (string, error)
 	RecordStatus(ctx context.Context, relayID string, st api.RelayStatus) error
+	RecordReachability(ctx context.Context, contributorKey, relayPubKey string, ok bool, detail string) error
 	DesiredState(ctx context.Context, relayID string) ([]api.Peer, []string, error)
 }
 
@@ -35,11 +36,45 @@ func NewServer(b Backend, pollSecs int) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/relay/register", s.handleRegister)
 	mux.HandleFunc("/v1/relay/sync", s.handleSync)
+	mux.HandleFunc("/v1/relay/reachability", s.handleReachability)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok\n"))
 	})
 	return mux
+}
+
+func (s *server) handleReachability(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "use POST", "")
+		return
+	}
+	var req api.ReachabilityReport
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "malformed JSON body", "")
+		return
+	}
+	if req.ContributorKey == "" || req.RelayPublicKey == "" {
+		writeErr(w, http.StatusBadRequest, "contributor_key and relay_public_key are required", "")
+		return
+	}
+	// Cap it: this string is shown back to a human and stored.
+	if len(req.Detail) > 500 {
+		req.Detail = req.Detail[:500]
+	}
+
+	err := s.b.RecordReachability(r.Context(), req.ContributorKey, req.RelayPublicKey, req.Reachable, req.Detail)
+	if errors.Is(err, ErrUnknownKey) {
+		writeErr(w, http.StatusForbidden, "that key does not own a relay with that public key",
+			"you can only report on relays you contributed")
+		return
+	}
+	if err != nil {
+		log.Printf("reachability: %v", err)
+		writeErr(w, http.StatusInternalServerError, "could not record the result", "")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

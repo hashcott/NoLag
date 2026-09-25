@@ -64,6 +64,13 @@ CREATE TABLE IF NOT EXISTS game_profile (
 
 -- Relay /16 allocation. A sequence rather than a row count: deleting a relay must
 -- not cause the next registration to reuse a subnet that is still in service.
+-- When an external check last proved this relay reachable. A relay that syncs has
+-- only shown it can reach US; the provider's security group sits in front of its
+-- UDP port and is invisible from inside the machine, so outbound success says
+-- nothing about whether a player can get in. NULL means never verified.
+ALTER TABLE relay ADD COLUMN IF NOT EXISTS reachable_at TIMESTAMPTZ;
+ALTER TABLE relay ADD COLUMN IF NOT EXISTS unreachable_detail TEXT NOT NULL DEFAULT '';
+
 CREATE SEQUENCE IF NOT EXISTS relay_octet_seq START 77 MAXVALUE 255;
 
 CREATE INDEX IF NOT EXISTS relay_status_idx     ON relay (status, last_seen);

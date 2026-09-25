@@ -339,3 +339,65 @@ func TestMarkStaleRelaysDown(t *testing.T) {
 		t.Errorf("the relay silent for an hour is %q, want down", staleStatus)
 	}
 }
+
+// A relay that syncs has shown it can reach US. That says nothing about whether
+// a player can reach IT: the provider's security group sits in front of its UDP
+// port and is invisible from inside the machine. status='up' must mean verified
+// reachable, or P3 selection hands players relays behind a closed firewall.
+func TestSyncingAloneDoesNotMakeARelayUp(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	key, _ := s.CreateContributorKey(ctx)
+	out, _ := s.RegisterRelay(ctx, RegisterInput{
+		ContributorKey: key, PublicKey: "pk-reach", Endpoint: "203.0.113.10:51820",
+	})
+
+	for i := 0; i < 5; i++ {
+		if err := s.RecordStatus(ctx, out.RelayID, api.RelayStatus{ActivePeers: 3}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var status string
+	s.pool.QueryRow(ctx, `SELECT status FROM relay WHERE id = $1`, out.RelayID).Scan(&status)
+	if status != "pending" {
+		t.Errorf("status = %q after five syncs and no external check, want pending", status)
+	}
+
+	// An external check succeeds: now it is up.
+	if err := s.RecordReachability(ctx, key, "pk-reach", true, ""); err != nil {
+		t.Fatal(err)
+	}
+	s.pool.QueryRow(ctx, `SELECT status FROM relay WHERE id = $1`, out.RelayID).Scan(&status)
+	if status != "up" {
+		t.Errorf("status = %q after a successful reachability check, want up", status)
+	}
+
+	// A later failed check takes it out of service.
+	if err := s.RecordReachability(ctx, key, "pk-reach", false, "no handshake within 12s"); err != nil {
+		t.Fatal(err)
+	}
+	var detail string
+	s.pool.QueryRow(ctx, `SELECT status, unreachable_detail FROM relay WHERE id = $1`, out.RelayID).Scan(&status, &detail)
+	if status != "unreachable" {
+		t.Errorf("status = %q after a failed check, want unreachable", status)
+	}
+	if detail == "" {
+		t.Error("the reason was not recorded; an operator needs to know why")
+	}
+}
+
+func TestReachabilityIsScopedToTheOwningContributor(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	owner, _ := s.CreateContributorKey(ctx)
+	stranger, _ := s.CreateContributorKey(ctx)
+	if _, err := s.RegisterRelay(ctx, RegisterInput{
+		ContributorKey: owner, PublicKey: "pk-owned", Endpoint: "203.0.113.10:51820",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	err := s.RecordReachability(ctx, stranger, "pk-owned", false, "sabotage")
+	if !errors.Is(err, ErrUnknownKey) {
+		t.Fatalf("err = %v, want ErrUnknownKey: a stranger must not be able to mark a relay unreachable", err)
+	}
+}

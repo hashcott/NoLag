@@ -11,11 +11,16 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"gamenolag/internal/api"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"golang.zx2c4.com/wireguard/wgctrl"
@@ -27,8 +32,15 @@ func main() {
 	pubkey := flag.String("pubkey", "", "relay WireGuard public key (required)")
 	iface := flag.String("iface", "gnlcheck0", "temporary interface name")
 	wait := flag.Duration("wait", 12*time.Second, "how long to wait for a handshake")
+	control := flag.String("control", "", "control plane base URL; when set, the verdict is reported there")
+	key := flag.String("key", "", "contributor key that owns this relay; required with -control")
 	flag.Parse()
 
+	if *control != "" && *key == "" {
+		fmt.Fprintln(os.Stderr, "-key is required with -control: the report is authenticated as the")
+		fmt.Fprintln(os.Stderr, "contributor who owns the relay, so nobody can mark a stranger's relay down")
+		os.Exit(2)
+	}
 	if *endpoint == "" || *pubkey == "" {
 		fmt.Fprintln(os.Stderr, "both -endpoint and -pubkey are required")
 		os.Exit(2)
@@ -94,6 +106,7 @@ func main() {
 				if !p.LastHandshakeTime.IsZero() {
 					fmt.Printf("REACHABLE: handshake completed at %s\n",
 						p.LastHandshakeTime.Format(time.RFC3339))
+					report(*control, *key, *pubkey, true, "")
 					os.Exit(0)
 				}
 			}
@@ -101,6 +114,8 @@ func main() {
 		time.Sleep(500 * time.Millisecond)
 	}
 
+	report(*control, *key, *pubkey, false,
+		fmt.Sprintf("no handshake from %s within %s", *endpoint, *wait))
 	fmt.Printf("NOT REACHABLE: no handshake from %s within %s\n", *endpoint, *wait)
 	fmt.Println()
 	fmt.Println("In order of likelihood:")
@@ -113,4 +128,48 @@ func main() {
 	fmt.Println("  4. The endpoint address is wrong, for example a private address")
 	fmt.Println("     was registered on a machine that is behind NAT.")
 	os.Exit(1)
+}
+
+// report sends the verdict to the control plane, when one was given.
+//
+// A check whose answer goes nowhere is why status could say "up" about a relay
+// nobody outside could reach: a sync only proves the relay can reach the control
+// plane, and the provider's security group sits in front of its UDP port where
+// the relay itself cannot see it.
+//
+// Reporting never changes this tool's exit code. The handshake is the finding;
+// failing to file it is a separate problem and is said out loud rather than
+// turned into a different verdict.
+func report(control, key, pubkey string, reachable bool, detail string) {
+	if control == "" {
+		return
+	}
+	body, err := json.Marshal(api.ReachabilityReport{
+		ContributorKey: key, RelayPublicKey: pubkey, Reachable: reachable, Detail: detail,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "could not encode the report: %v\n", err)
+		return
+	}
+	url := strings.TrimSuffix(control, "/") + "/v1/relay/reachability"
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "could not build the report request: %v\n", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "could not reach the control plane to report: %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		var e api.ErrorResponse
+		json.NewDecoder(resp.Body).Decode(&e)
+		fmt.Fprintf(os.Stderr, "the control plane refused the report: %s %s\n", resp.Status, e.Error)
+		return
+	}
+	fmt.Printf("reported to %s\n", control)
 }

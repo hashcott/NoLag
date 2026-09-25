@@ -83,6 +83,19 @@ type SyncResponse struct {
 	PollSecs  int      `json:"poll_secs"`
 }
 
+// ReachabilityReport is the verdict of an external reachability check, sent by
+// whoever ran gnl-relaycheck.
+//
+// It is authenticated with the contributor key rather than the relay's own
+// token, because the relay cannot perform this check on itself: the whole point
+// is that the test runs from somewhere else.
+type ReachabilityReport struct {
+	ContributorKey string `json:"contributor_key"`
+	RelayPublicKey string `json:"relay_public_key"`
+	Reachable      bool   `json:"reachable"`
+	Detail         string `json:"detail,omitempty"`
+}
+
 // ErrorResponse is the body of every non-2xx reply.
 type ErrorResponse struct {
 	Error string `json:"error"`

@@ -108,7 +108,8 @@ them they would never match, and the cap would be present but inert.
 From a different machine — not the relay:
 
 ```bash
-sudo gnl-relaycheck -endpoint <relay-ip>:51820 -pubkey <relay public key>
+sudo gnl-relaycheck -endpoint <relay-ip>:51820 -pubkey <relay public key> \
+                    -control https://cp.example.com --key GNL-XXXX-XXXX-XXXX-XXXX
 ```
 
 The public key is printed by the installer, and on the relay is:
@@ -119,6 +120,33 @@ wg pubkey < /etc/gnl/relay.key
 
 `REACHABLE` means the relay is genuinely serviceable. `NOT REACHABLE` prints the
 causes in order of likelihood, starting with the provider's security group.
+
+**`-control` and `--key` are what make the result count.** Without them the check
+tells you the answer and the control plane never learns it — and a relay it has
+not verified stays `pending` and is never offered to players, no matter how
+faithfully its agent syncs.
+
+That is deliberate. A sync only proves the relay can reach the control plane. It
+proves nothing about whether a player can reach the relay, because the provider's
+security group sits in front of the UDP port and is invisible from inside the
+machine — which is exactly the most common reason a relay looks healthy locally
+and is unreachable from everywhere else. Only this check settles it.
+
+The key authenticates the report as the contributor who owns that relay, so
+nobody can mark a stranger's relay unreachable and take it out of service.
+
+A relay's status therefore reads:
+
+| status | meaning |
+|---|---|
+| `pending` | registered, never verified from outside. Not offered to players |
+| `up` | verified reachable, and still syncing |
+| `unreachable` | an external check failed; the reason is stored alongside it |
+| `down` | stopped syncing for five minutes |
+
+Re-run this check after anything that could change the network path — a reboot,
+a provider firewall change, a new IP address.
+
 
 ## 5. Bind a test device and watch it arrive
 
