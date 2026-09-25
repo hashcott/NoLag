@@ -212,6 +212,39 @@ ipset list gnl-games
 The real profile comes from P4. These two ranges are illustrative and are enough
 to prove the plumbing.
 
+## Before any contributor runs this: one throwaway VM
+
+Everything in this phase was written and tested on macOS, where iptables, ipset,
+systemd and the WireGuard kernel module do not exist. The Go tests cover the
+logic. They cannot cover whether the kernel accepts the syntax, whether systemd
+parses the units, or whether the uninstall really reverses the install.
+
+`deploy/verify-on-linux.sh` does all of that in one run — install, assert against
+live kernel state, re-install to check idempotence, destroy the interface to
+simulate a reboot, uninstall, and assert the machine is back as it was:
+
+```bash
+# on a Linux VM you are willing to destroy
+sudo ./verify-on-linux.sh --control https://cp.example.com --key GNL-XXXX-XXXX-XXXX-XXXX
+```
+
+It is not a dry run: it genuinely changes the firewall and systemd on that
+machine. That is the point — the failures it is looking for only exist on a real
+one.
+
+Twenty-five assertions, each covering something the development machine could
+not execute. The ones most worth watching:
+
+- the `hashlimit` cap rules sit **above** the ACCEPTs (below them a cap never
+  matches and silently does nothing)
+- a second install adds no duplicate rules
+- deleting the interface and restarting `gnl-wg.service` brings it back — a
+  reboot without waiting for one
+- after `--uninstall` the FORWARD policy is no longer DROP and `rp_filter` is
+  restored, so a contributor's own Docker or VPN still works
+
+Until this passes, do not hand the installer to anybody.
+
 ## What is deliberately not here
 
 - **Client.** P2. Until then, peers are bound by hand as in step 5.
