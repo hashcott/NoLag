@@ -38,6 +38,17 @@ Build once, copy everywhere:
 GOOS=linux GOARCH=amd64 go build -o gnl-probe ./cmd/gnl-probe
 ```
 
+Also build `gnl-analyze` now, so it is ready when the campaign finishes:
+
+```bash
+go build -o gnl-analyze ./cmd/gnl-analyze
+```
+
+`gnl-analyze` never runs on a measurement host — only `gnl-probe` gets deployed
+to the landmarks, VPSes and Vietnamese clients. `gnl-analyze` runs later, once,
+on whichever machine you collect the results files onto (see "Reading the
+answer" below), so build it for that machine, not necessarily `linux/amd64`.
+
 **On each landmark.** `--allow` takes the public addresses permitted to probe
 it: every candidate VPS, plus every Vietnamese measurement client.
 
@@ -63,19 +74,32 @@ Every address that will ever probe this host must be in this list. One missing
 client does not produce an error — it produces a week of total loss for that ISP,
 which reads like a terrible route rather than a closed port.
 
-Then add cron. Every 20 minutes, one 60-second run per landmark:
+Then add cron. Every 20 minutes, one 60-second run per landmark — one line per
+landmark, so two rented landmarks means two lines here, not one:
 
 ```cron
-*/20 * * * * /usr/local/bin/gnl-probe client -target <landmark-sgp-ip>:51830 \
-  -leg C -from vps-sgp-vultr -to landmark-sgp -duration 60s \
-  -out /var/lib/gnl/results.jsonl
+*/20 * * * * /usr/local/bin/gnl-probe client -target <landmark-sgp-ip>:51830 -leg C -from vps-sgp-vultr -to landmark-sgp -duration 60s -out /var/lib/gnl/results.jsonl
+*/20 * * * * /usr/local/bin/gnl-probe client -target <landmark-tyo-ip>:51830 -leg C -from vps-sgp-vultr -to landmark-tyo -duration 60s -out /var/lib/gnl/results.jsonl
 ```
+
+Crontab has no line continuation — the command field runs to end of line — so
+each entry above is written on one line, however long, and pasted as-is. A file
+with a backslash continuation is rejected whole by `crontab file`, which leaves
+whatever crontab already existed (usually empty) in place with no error visible
+at a glance.
 
 The installer has already created `/var/lib/gnl` and given it to the account that
 ran `sudo`, so either that account's crontab or root's will work. Do not paste
 these lines into `/etc/cron.d`: files there need an extra user field before the
 command, and without it cron reads `/usr/local/bin/gnl-probe` as a username and
 silently discards the entry.
+
+If you run `gnl-probe` by hand to test before trusting it to cron, run it as the
+same account the cron entries above will use. The installer only chowns the
+`/var/lib/gnl` *directory*; a hand run under `sudo` creates `results.jsonl`
+owned by root, and every cron run afterwards under the unprivileged account
+fails silently with EACCES into cron mail that nobody reads. If you already did
+this, `chown` the file to match.
 
 **On each Vietnamese measurement client.** First install the binary, exactly as on the VPS hosts. Client mode configures no
 firewall and no service; it only places `gnl-probe` where cron can find it:
@@ -84,19 +108,25 @@ firewall and no service; it only places `gnl-probe` where cron can find it:
 sudo ./install-probe.sh --mode client
 ```
 
-Then add cron. One leg A run per landmark, and one leg B run per candidate VPS:
+Then add cron. One leg A run per landmark (repeat the leg-A line once per rented
+landmark — a missing leg-A-to-Tokyo line makes every Tokyo row fail "no leg A
+baseline for this ISP"), and one leg B run per candidate VPS:
 
 ```cron
-*/20 * * * * /usr/local/bin/gnl-probe client -target <landmark-sgp-ip>:51830 \
-  -leg A -from vn-viettel -to landmark-sgp -duration 60s -out /var/lib/gnl/results.jsonl
-*/20 * * * * /usr/local/bin/gnl-probe client -target <vps-1-ip>:51830 \
-  -leg B -from vn-viettel -to vps-sgp-vultr -duration 60s -out /var/lib/gnl/results.jsonl
-*/20 * * * * /usr/local/bin/gnl-probe client -target <vps-2-ip>:51830 \
-  -leg B -from vn-viettel -to vps-sgp-digitalocean -duration 60s -out /var/lib/gnl/results.jsonl
+*/20 * * * * /usr/local/bin/gnl-probe client -target <landmark-sgp-ip>:51830 -leg A -from vn-viettel -to landmark-sgp -duration 60s -out /var/lib/gnl/results.jsonl
+*/20 * * * * /usr/local/bin/gnl-probe client -target <landmark-tyo-ip>:51830 -leg A -from vn-viettel -to landmark-tyo -duration 60s -out /var/lib/gnl/results.jsonl
+*/20 * * * * /usr/local/bin/gnl-probe client -target <vps-1-ip>:51830 -leg B -from vn-viettel -to vps-sgp-vultr -duration 60s -out /var/lib/gnl/results.jsonl
+*/20 * * * * /usr/local/bin/gnl-probe client -target <vps-2-ip>:51830 -leg B -from vn-viettel -to vps-sgp-digitalocean -duration 60s -out /var/lib/gnl/results.jsonl
 ```
 
+Crontab has no line continuation — the command field runs to end of line — so
+each entry above is written on one line, however long, and pasted as-is. A file
+with a backslash continuation is rejected whole by `crontab file`, which leaves
+whatever crontab already existed (usually empty) in place with no error visible
+at a glance.
+
 The block above is for the Viettel host. On the VNPT and FPT machines use the
-same three lines with `-from vn-vnpt` and `-from vn-fpt`. Changing `-from` is not
+same four lines with `-from vn-vnpt` and `-from vn-fpt`. Changing `-from` is not
 cosmetic: the analysis groups every leg by that exact string, so a box that still
 says `vn-viettel` files its measurements under Viettel's baseline and the two
 ISPs blend into one candidate that looks complete and is wrong.
@@ -106,6 +136,12 @@ ran `sudo`, so either that account's crontab or root's will work. Do not paste
 these lines into `/etc/cron.d`: files there need an extra user field before the
 command, and without it cron reads `/usr/local/bin/gnl-probe` as a username and
 silently discards the entry.
+
+If you run `gnl-probe` by hand to test before trusting it to cron, run it as the
+same account the cron entries above will use, or `chown` the resulting
+`results.jsonl` back afterwards — a root-owned file from a `sudo` test run fails
+every later cron-owned append with EACCES, silently, into cron mail nobody
+reads.
 
 Names in `-from` and `-to` must be **identical everywhere**. The analysis joins
 legs by those strings; a VPS called `vps-sgp-vultr` on one machine and
@@ -136,6 +172,14 @@ address (expect silence). If both hold, the script is good for the fleet.
 Doing this on one host costs ten minutes. Skipping it risks discovering a bad
 unit file on every host at once, at the start of a week-long campaign.
 
+On a freshly provisioned VPS, let `chrony` (or whatever NTP client the image
+ships) finish its initial sync before starting collection. RTT is derived from
+`time.Now()` read twice on the same host, once at send and once at receive; a
+large step correction landing mid-flight of a brand-new VM's clock — common
+right after boot — corrupts or discards samples taken around it. Check
+`chronyc tracking` (or equivalent) shows a small, stable offset before you add
+the cron entries.
+
 ## Running it
 
 Leave it for **seven full days**. Do not stop early on a good first evening —
@@ -151,7 +195,11 @@ tail -3 /var/lib/gnl/results.jsonl
 
 ## Reading the answer
 
-Collect every `results.jsonl` onto one machine, concatenate, and run:
+Collect each host's `results.jsonl` into a directory named after that host —
+`vn-viettel/results.jsonl`, `vn-vnpt/results.jsonl`, `vn-fpt/results.jsonl`,
+`vps-sgp-vultr/results.jsonl`, `vps-sgp-digitalocean/results.jsonl`, and so on —
+onto one machine, then concatenate and run `gnl-analyze` there (built earlier,
+in "Setup"; it never runs on a measurement host):
 
 ```bash
 cat vn-*/results.jsonl vps-*/results.jsonl > campaign.jsonl
@@ -169,29 +217,51 @@ and the rest of the campaign is still good. A large count means something else i
 wrong — check that every host wrote to a local disk rather than a network mount.
 
 The JITTER and LOSS columns show the worst single run of the week on either
-tunnel leg, not an average. One bad evening on a home connection can therefore
-fail an otherwise clean week — if a candidate fails only on these, look at
-whether it is one outlier before writing the provider off.
+tunnel leg — useful context, but not what decides the verdict. The J-OVER and
+L-OVER columns show the *share* of runs that breached each bar, and that share
+is the actual gate (see "A candidate passes" below): no more than
+`-max-breach-pct` of runs may breach. A single bad evening on a home
+connection, or one VPS reboot, no longer fails an otherwise clean week on its
+own — that was the old behavior and it failed almost any real path.
 
-The peak window is **19:00–23:00 Vietnam time (UTC+7)**, and `gnl-analyze` prints
-the window it used on every run. Records outside it are discarded entirely.
+The peak window is **20:00–22:00 Vietnam time (UTC+7)** by default — this is the
+window the design document prescribes, and it is the verdict of record. Widen
+it with `-peak-start`/`-peak-end` if you want to look at the shoulder hours, but
+treat any run outside 20:00–22:00 as informational only: the shoulder hours are
+less congested, which flatters both the baseline and the tunnel, so a verdict
+taken over a wider window is not the one that counts. `gnl-analyze` prints the
+window it used on every run. Records outside it are discarded entirely.
 
 Timezones cannot be got wrong here: every record carries an absolute UTC
 timestamp and the conversion happens at analysis time, so it does not matter what
 timezone any measuring host is set to. `-peak-start` and `-peak-end` change the
 window if you ever need a different one.
 
-A candidate passes only when all five hold at peak hours:
+A candidate passes only when all six hold at peak hours:
 
-- `B + C < A` — the tunnel is genuinely faster
-- jitter (p95 − p50) **under** 10 ms on both tunnel legs
-- loss **under** 0.5% on both tunnel legs
-- p99 **under** p50 + 30 ms on both tunnel legs
-- at least 20 runs inside the peak window, counted on the **weaker** of the two
-  tunnel legs
+- `B + C < A` by at least `-min-gain-ms` (default 5 ms) — the tunnel must beat
+  the ISP route clearly, not by an amount two independently-measured legs
+  summed against a third cannot tell apart from noise
+- jitter (p95 − p50) at or over 10 ms on no more than `-max-breach-pct` of runs
+  (default 5%) on either tunnel leg
+- loss at or over 0.5% on no more than `-max-breach-pct` of runs on either
+  tunnel leg
+- p99 at or over p50 + 30 ms on no more than `-max-breach-pct` of runs on
+  either tunnel leg
+- at least 20 usable runs inside the peak window, counted on the **weakest of
+  all three legs, baseline included** — leg A is the denominator of the whole
+  comparison, so a single leg-A sample taken during one ISP spike must not be
+  allowed to carry the entire verdict on its own
 
-The three latency and loss thresholds are strict: a value sitting exactly on a bar fails. Six lost
-packets out of 1200 is exactly 0.5%, and that is a fail, not a pass. The run floor is a minimum: exactly 20 runs passes.
+The three latency and loss bars are strict: a run sitting exactly on the bar
+counts as a breach, not a pass. Six lost packets out of 1200 is exactly 0.5%,
+and that run breaches. What decides the verdict is the *share* of runs that
+breach, not whether any run ever breaches — gating on the single worst run
+across ~84 runs a week fails almost any real path, since the odds that none of
+them ever has a bad evening are close to zero. The run floor is a minimum:
+exactly 20 usable runs passes. A run that lost every packet carries no latency
+information and does not count toward the floor, even though it still counts
+toward loss.
 
 The run floor exists because a median taken over one sample is not evidence. If a
 candidate reports too few runs, the verdict says so in its own words — "too
