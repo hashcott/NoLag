@@ -293,7 +293,8 @@ func (s *Store) RecordReachability(ctx context.Context, contributorKey, relayPub
 		tag, err = s.pool.Exec(ctx,
 			`UPDATE relay
 			    SET reachable_at = now(), status = 'up', unreachable_detail = ''
-			  WHERE wg_pubkey = $1 AND key_hash = $2`,
+			  WHERE wg_pubkey = $1 AND key_hash = $2
+			    AND key_hash IN (SELECT key_hash FROM contributor_key WHERE status = 'active')`,
 			relayPubKey, keyHash)
 	} else {
 		// Not cleared: a relay that was reachable and now is not keeps its
@@ -302,7 +303,8 @@ func (s *Store) RecordReachability(ctx context.Context, contributorKey, relayPub
 		tag, err = s.pool.Exec(ctx,
 			`UPDATE relay
 			    SET status = 'unreachable', unreachable_detail = $3
-			  WHERE wg_pubkey = $1 AND key_hash = $2`,
+			  WHERE wg_pubkey = $1 AND key_hash = $2
+			    AND key_hash IN (SELECT key_hash FROM contributor_key WHERE status = 'active')`,
 			relayPubKey, keyHash, detail)
 	}
 	if err != nil {
@@ -341,6 +343,10 @@ func (s *Store) MarkStaleRelaysDown(ctx context.Context, after time.Duration) (i
 // DesiredState returns every peer this relay must accept and the current game
 // CIDR allowlist.
 //
+// Only peers whose key is active, and none at all on a relay whose owner's key
+// is not: revoking a key has to reach a tunnel that is already up, and the only
+// thing that reaches it is the relay dropping the peer on its next sync.
+//
 // No published profile is not an error: it means nothing may be forwarded yet,
 // which is the correct state for a relay brought up before the first profile
 // exists.
@@ -349,6 +355,9 @@ func (s *Store) DesiredState(ctx context.Context, relayID string) ([]api.Peer, [
 		`SELECT d.wg_pubkey, b.inner_ip
 		   FROM peer_binding b
 		   JOIN device d ON d.id = b.device_id
+		   JOIN contributor_key dk ON dk.key_hash = d.key_hash AND dk.status = 'active'
+		   JOIN relay r ON r.id = b.relay_id
+		   JOIN contributor_key rk ON rk.key_hash = r.key_hash AND rk.status = 'active'
 		  WHERE b.relay_id = $1
 		  ORDER BY d.wg_pubkey`, relayID)
 	if err != nil {
@@ -540,9 +549,14 @@ func (s *Store) bindDeviceToRelays(ctx context.Context, tx pgx.Tx, deviceID, key
 func (s *Store) Session(ctx context.Context, contributorKey, devicePubKey string, mtu int) (api.SessionResponse, error) {
 	keyHash := Hash(contributorKey)
 
+	// The key's status, not only its existence: a device activated before its key
+	// was revoked still has its row, and must not go on being handed relays.
 	var deviceID string
 	err := s.pool.QueryRow(ctx,
-		`SELECT id FROM device WHERE wg_pubkey = $1 AND key_hash = $2`,
+		`SELECT d.id
+		   FROM device d
+		   JOIN contributor_key k ON k.key_hash = d.key_hash AND k.status = 'active'
+		  WHERE d.wg_pubkey = $1 AND d.key_hash = $2`,
 		devicePubKey, keyHash).Scan(&deviceID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return api.SessionResponse{}, ErrUnknownKey
@@ -558,6 +572,7 @@ func (s *Store) Session(ctx context.Context, contributorKey, devicePubKey string
 		`SELECT r.id, r.endpoint, r.wg_pubkey, b.inner_ip, r.region
 		   FROM relay r
 		   JOIN peer_binding b ON b.relay_id = r.id AND b.device_id = $1
+		   JOIN contributor_key rk ON rk.key_hash = r.key_hash AND rk.status = 'active'
 		  WHERE r.status = 'up'
 		    AND r.trusted_after <= now()
 		  ORDER BY r.region, r.id`, deviceID)
@@ -665,14 +680,18 @@ func (s *Store) ObservedAddresses(ctx context.Context, gameID string) ([]string,
 // same address twice is one observation, not two. The promotion rule counts
 // independent contributors and would otherwise be satisfiable by one.
 func (s *Store) RecordObservation(ctx context.Context, contributorKey, gameID, dstIP string, dstPort int) error {
-	_, err := s.pool.Exec(ctx,
+	tag, err := s.pool.Exec(ctx,
 		`INSERT INTO observed_address (game_id, dst_ip, dst_port, key_hash)
-		 VALUES ($1,$2,$3,$4)
+		 SELECT $1, $2, $3, key_hash FROM contributor_key
+		  WHERE key_hash = $4 AND status = 'active'
 		 ON CONFLICT (game_id, dst_ip, dst_port, key_hash)
 		 DO UPDATE SET last_seen = now()`,
 		gameID, dstIP, dstPort, Hash(contributorKey))
 	if err != nil {
 		return fmt.Errorf("control: record observation: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrUnknownKey
 	}
 	return nil
 }
@@ -686,12 +705,13 @@ func (s *Store) RecordObservation(ctx context.Context, contributorKey, gameID, d
 // profile on one person's word.
 func (s *Store) CandidateAddresses(ctx context.Context, gameID string, minReporters int) ([]string, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT dst_ip
-		   FROM observed_address
-		  WHERE game_id = $1
-		  GROUP BY dst_ip
-		 HAVING COUNT(DISTINCT key_hash) >= $2
-		  ORDER BY dst_ip`, gameID, minReporters)
+		`SELECT o.dst_ip
+		   FROM observed_address o
+		   JOIN contributor_key k ON k.key_hash = o.key_hash AND k.status = 'active'
+		  WHERE o.game_id = $1
+		  GROUP BY o.dst_ip
+		 HAVING COUNT(DISTINCT o.key_hash) >= $2
+		  ORDER BY o.dst_ip`, gameID, minReporters)
 	if err != nil {
 		return nil, fmt.Errorf("control: read candidates: %w", err)
 	}

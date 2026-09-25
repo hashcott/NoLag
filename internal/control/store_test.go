@@ -711,3 +711,133 @@ func TestObservationsAreScopedPerGame(t *testing.T) {
 			"no separating them", other)
 	}
 }
+
+func revoke(t *testing.T, s *Store, key string) {
+	t.Helper()
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE contributor_key SET status = 'revoked' WHERE key_hash = $1`, Hash(key)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// usableRelay registers a relay for key and makes it one a session would offer.
+func usableRelay(t *testing.T, s *Store, key, pubkey string) RegisterOutput {
+	t.Helper()
+	ctx := context.Background()
+	out, err := s.RegisterRelay(ctx, RegisterInput{ContributorKey: key, PublicKey: pubkey, Endpoint: "203.0.113.9:51820"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordReachability(ctx, key, pubkey, true, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE relay SET trusted_after = now() - interval '1 day' WHERE id = $1`, out.RelayID); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func TestARevokedKeyGetsNoSession(t *testing.T) {
+	// Revoking a key is how somebody is put out of the network. A device it had
+	// already activated must not go on fetching relays as if nothing happened.
+	ctx := context.Background()
+	s := openTestStore(t)
+	owner, _ := s.CreateContributorKey(ctx)
+	player, _ := s.CreateContributorKey(ctx)
+	usableRelay(t, s, owner, "r-1")
+	if _, _, err := s.ActivateDevice(ctx, player, "dev-pk", "pc"); err != nil {
+		t.Fatal(err)
+	}
+	revoke(t, s, player)
+	if _, err := s.Session(ctx, player, "dev-pk", 1420); !errors.Is(err, ErrUnknownKey) {
+		t.Errorf("err = %v, want ErrUnknownKey for a revoked key", err)
+	}
+}
+
+func TestARevokedKeysDevicesLeaveEveryRelay(t *testing.T) {
+	// Refusing the session is not enough: a client already connected keeps its
+	// tunnel for as long as the relay keeps its peer.
+	ctx := context.Background()
+	s := openTestStore(t)
+	owner, _ := s.CreateContributorKey(ctx)
+	player, _ := s.CreateContributorKey(ctx)
+	relay := usableRelay(t, s, owner, "r-1")
+	if _, _, err := s.ActivateDevice(ctx, player, "dev-pk", "pc"); err != nil {
+		t.Fatal(err)
+	}
+	revoke(t, s, player)
+	peers, _, err := s.DesiredState(ctx, relay.RelayID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(peers) != 0 {
+		t.Errorf("relay still carries %+v for a revoked key", peers)
+	}
+}
+
+func TestARevokedContributorsRelayCarriesNobody(t *testing.T) {
+	// A key is often revoked because of what its owner did. Their relay must stop
+	// being offered and stop carrying anybody's traffic.
+	ctx := context.Background()
+	s := openTestStore(t)
+	owner, _ := s.CreateContributorKey(ctx)
+	player, _ := s.CreateContributorKey(ctx)
+	relay := usableRelay(t, s, owner, "r-1")
+	if _, _, err := s.ActivateDevice(ctx, player, "dev-pk", "pc"); err != nil {
+		t.Fatal(err)
+	}
+	revoke(t, s, owner)
+	sess, err := s.Session(ctx, player, "dev-pk", 1420)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sess.Relays) != 0 {
+		t.Errorf("a revoked contributor's relay is still offered: %+v", sess.Relays)
+	}
+	peers, _, err := s.DesiredState(ctx, relay.RelayID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(peers) != 0 {
+		t.Errorf("a revoked contributor's relay is still given peers: %+v", peers)
+	}
+}
+
+func TestARevokedKeyCannotVouchForItsRelay(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	owner, _ := s.CreateContributorKey(ctx)
+	if _, err := s.RegisterRelay(ctx, RegisterInput{ContributorKey: owner, PublicKey: "r-1", Endpoint: "203.0.113.9:51820"}); err != nil {
+		t.Fatal(err)
+	}
+	revoke(t, s, owner)
+	if err := s.RecordReachability(ctx, owner, "r-1", true, ""); !errors.Is(err, ErrUnknownKey) {
+		t.Errorf("err = %v, want ErrUnknownKey: a revoked key must not mark its relay up", err)
+	}
+}
+
+func TestARevokedKeyNoLongerCountsTowardsAProfile(t *testing.T) {
+	// The promotion rule counts independent contributors. One of them being
+	// revoked, before or after reporting, must take their vote with them.
+	ctx := context.Background()
+	s := openTestStore(t)
+	var keys []string
+	for i := 0; i < 3; i++ {
+		k, _ := s.CreateContributorKey(ctx)
+		keys = append(keys, k)
+		if err := s.RecordObservation(ctx, k, "pubg", "20.24.50.9", 20522); err != nil {
+			t.Fatal(err)
+		}
+	}
+	revoke(t, s, keys[0])
+	got, err := s.CandidateAddresses(ctx, "pubg", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("candidates = %v with one of three reporters revoked", got)
+	}
+	if err := s.RecordObservation(ctx, keys[0], "pubg", "20.24.50.10", 20522); !errors.Is(err, ErrUnknownKey) {
+		t.Errorf("err = %v, want ErrUnknownKey for a report from a revoked key", err)
+	}
+}

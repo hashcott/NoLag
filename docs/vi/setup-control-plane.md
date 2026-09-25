@@ -180,7 +180,7 @@ tiếp theo, hoặc khi bấm *Refresh game list*.
 |---|---|
 | Xem toàn bộ relay | Câu `SELECT` ở bước 6 |
 | Giải phóng một slot thiết bị | Contributor gọi `DELETE /v1/devices/{id}` bằng key của họ, hoặc chạy `DELETE FROM device WHERE id = '…';` |
-| Thu hồi một key | `UPDATE contributor_key SET status = 'revoked' WHERE key_hash = '…';` rồi `DELETE FROM device WHERE key_hash = '…';` Hash tính bằng `printf %s 'GNL-…' \| sha256sum`. **Cần cả hai bước:** key đã thu hồi không thể đăng ký relay hay kích hoạt thiết bị mới, nhưng các thiết bị nó đã kích hoạt vẫn tiếp tục nhận session cho tới khi các dòng của chúng bị xoá |
+| Thu hồi một key | `UPDATE contributor_key SET status = 'revoked' WHERE key_hash = '…';` Hash tính bằng `printf %s 'GNL-…' \| sha256sum`. Trong vòng một lần sync, các thiết bị của key bị gỡ khỏi mọi relay, các relay của key không còn được đưa cho người chơi và không mang lưu lượng của ai, và các observation của key không còn được tính vào profile. Key đó không đăng ký, kích hoạt, báo reachability hay gửi observation được nữa |
 | Xoá một relay | `DELETE FROM relay WHERE id = '…';` Các peer binding của nó bị xoá theo |
 | Log | `journalctl -u gnl-control -f` |
 | Sao lưu | `pg_dump gamenolag`. Database là toàn bộ trạng thái; binary không giữ trạng thái |

@@ -35,6 +35,33 @@ jobs:
         run: GOOS=windows go vet ./...
       - run: go test -count=1 ./...
 
+  store:
+    # The control plane's store tests skip without a database, so the test job
+    # never ran them. This one gives them one.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: gnl
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d gnl"
+          --health-interval 2s --health-timeout 5s --health-retries 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: store tests against Postgres
+        # Explicit bash runs with pipefail, so a failing go test is not hidden by tee.
+        shell: bash
+        run: |
+          test_dsn='postgres://postgres:test@127.0.0.1:5432/gnl?sslmode=disable'
+          GNL_TEST_DSN="$test_dsn" go test -count=1 -v ./internal/control/ | tee store.log
+          ! grep -q -- '--- SKIP' store.log
+
   firewall:
     # iptables and ipset against a real kernel, in a privileged container so the
     # runner's own firewall is left alone. The same script developers run.
@@ -44,7 +71,7 @@ jobs:
       - run: ./deploy/verify-firewall-in-docker.sh
 
   build:
-    needs: [test, firewall]
+    needs: [test, store, firewall]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

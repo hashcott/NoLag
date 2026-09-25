@@ -289,7 +289,12 @@ func (s *server) handleObservations(w http.ResponseWriter, r *http.Request) {
 			out.Rejected++
 			continue
 		}
-		if err := s.b.RecordObservation(r.Context(), req.ContributorKey, req.GameID, addr.String(), o.DstPort); err != nil {
+		err = s.b.RecordObservation(r.Context(), req.ContributorKey, req.GameID, addr.String(), o.DstPort)
+		if errors.Is(err, ErrUnknownKey) {
+			writeErr(w, http.StatusForbidden, "unknown or revoked contributor key", "")
+			return
+		}
+		if err != nil {
 			log.Printf("observation: %v", err)
 			writeErr(w, http.StatusInternalServerError, "could not store the report", "")
 			return

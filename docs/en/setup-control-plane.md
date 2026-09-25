@@ -173,7 +173,7 @@ connect, or on *Refresh game list*.
 |---|---|
 | See the fleet | The `SELECT` in step 6 |
 | Free a device slot | The contributor calls `DELETE /v1/devices/{id}` with their key, or run `DELETE FROM device WHERE id = '…';` |
-| Revoke a key | `UPDATE contributor_key SET status = 'revoked' WHERE key_hash = '…';` then `DELETE FROM device WHERE key_hash = '…';` The hash is `printf %s 'GNL-…' \| sha256sum`. **Both steps are needed:** a revoked key cannot register relays or activate new devices, but devices it already activated keep receiving sessions until their rows are deleted |
+| Revoke a key | `UPDATE contributor_key SET status = 'revoked' WHERE key_hash = '…';` The hash is `printf %s 'GNL-…' \| sha256sum`. Within one sync the key's devices leave every relay, its relays stop being offered and carry nobody, and its observations stop counting towards profiles. It can no longer register, activate, report reachability or report observations |
 | Remove a relay | `DELETE FROM relay WHERE id = '…';` Its peer bindings go with it |
 | Logs | `journalctl -u gnl-control -f` |
 | Back up | `pg_dump gamenolag`. The database is the whole state; the binary is stateless |

@@ -36,9 +36,13 @@ type fakeBackend struct {
 	prof       api.ProfileResponse
 	releaseErr error
 	obs        []api.Observation
+	obsErr     error
 }
 
 func (f *fakeBackend) RecordObservation(_ context.Context, _, _, ip string, port int) error {
+	if f.obsErr != nil {
+		return f.obsErr
+	}
 	f.obs = append(f.obs, api.Observation{DstIP: ip, DstPort: port})
 	return nil
 }
@@ -495,5 +499,19 @@ func TestObservationsRequireKeyAndGame(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("status = %d for %+v, want 400", rec.Code, r)
 		}
+	}
+}
+
+// A report under a key the control plane does not know, or has revoked, is
+// refused as a whole. Accepting it would let anybody make up three keys and
+// promote any address they liked.
+func TestObservationsFromAnUnknownKeyAreRefused(t *testing.T) {
+	b := &fakeBackend{obsErr: ErrUnknownKey}
+	rec := post(t, NewServer(b, 10, false), "/v1/observations", "", api.ObservationReport{
+		ContributorKey: "GNL-MADE-UP", GameID: "pubg",
+		Observations: []api.Observation{{DstIP: "20.24.50.9", DstPort: 20522}},
+	})
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", rec.Code)
 	}
 }

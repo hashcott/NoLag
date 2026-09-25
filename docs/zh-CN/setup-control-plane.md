@@ -169,7 +169,7 @@ gnl-profile -game valorant -aws-regions ap-southeast-1,ap-northeast-1 -publish
 |---|---|
 | 查看中继集群 | 第 6 步中的 `SELECT` |
 | 释放设备名额 | 贡献者携带其密钥调用 `DELETE /v1/devices/{id}`，或执行 `DELETE FROM device WHERE id = '…';` |
-| 吊销密钥 | `UPDATE contributor_key SET status = 'revoked' WHERE key_hash = '…';` 然后 `DELETE FROM device WHERE key_hash = '…';` 哈希值为 `printf %s 'GNL-…' \| sha256sum`。**两步缺一不可：** 被吊销的密钥无法再注册中继或激活新设备，但它已激活的设备在其记录被删除之前仍会继续获得会话 |
+| 吊销密钥 | `UPDATE contributor_key SET status = 'revoked' WHERE key_hash = '…';` 哈希值为 `printf %s 'GNL-…' \| sha256sum`。一次同步之内，该密钥的设备会从所有中继上移除，其名下的中继不再分配给玩家、也不再承载任何流量，其观测记录也不再计入配置。该密钥将无法再注册、激活、上报可达性或提交观测 |
 | 移除中继 | `DELETE FROM relay WHERE id = '…';` 其对端绑定会一并删除 |
 | 日志 | `journalctl -u gnl-control -f` |
 | 备份 | `pg_dump gamenolag`。数据库就是全部状态；二进制文件是无状态的 |
