@@ -659,21 +659,50 @@ func (s *Store) ObservedAddresses(ctx context.Context, gameID string) ([]string,
 	return out, rows.Err()
 }
 
-// RecordObservation stores one address seen carrying a game's traffic.
+// RecordObservation stores one address a contributor saw carrying game traffic.
 //
-// Only the destination is kept. Not the payload, not the source, not who
-// reported it - the profile needs the address and nothing else, and storing
-// more would make this a record of what people were doing rather than of where
-// the game lives.
-func (s *Store) RecordObservation(ctx context.Context, gameID, dstIP string, dstPort int) error {
+// The reporting key is part of the primary key, so the same person reporting the
+// same address twice is one observation, not two. The promotion rule counts
+// independent contributors and would otherwise be satisfiable by one.
+func (s *Store) RecordObservation(ctx context.Context, contributorKey, gameID, dstIP string, dstPort int) error {
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO observed_address (game_id, dst_ip, dst_port, reports)
-		 VALUES ($1,$2,$3,1)
-		 ON CONFLICT (game_id, dst_ip, dst_port)
-		 DO UPDATE SET reports = observed_address.reports + 1, last_seen = now()`,
-		gameID, dstIP, dstPort)
+		`INSERT INTO observed_address (game_id, dst_ip, dst_port, key_hash)
+		 VALUES ($1,$2,$3,$4)
+		 ON CONFLICT (game_id, dst_ip, dst_port, key_hash)
+		 DO UPDATE SET last_seen = now()`,
+		gameID, dstIP, dstPort, Hash(contributorKey))
 	if err != nil {
 		return fmt.Errorf("control: record observation: %w", err)
 	}
 	return nil
+}
+
+// CandidateAddresses returns addresses reported by at least minReporters
+// separate contributors.
+//
+// This is the middle tier: one contributor seeing an address is a lead, several
+// independently seeing it is evidence. A wrong CIDR drags unrelated traffic
+// through somebody's relay or breaks a player's connection, so nothing reaches a
+// profile on one person's word.
+func (s *Store) CandidateAddresses(ctx context.Context, gameID string, minReporters int) ([]string, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT dst_ip
+		   FROM observed_address
+		  WHERE game_id = $1
+		  GROUP BY dst_ip
+		 HAVING COUNT(DISTINCT key_hash) >= $2
+		  ORDER BY dst_ip`, gameID, minReporters)
+	if err != nil {
+		return nil, fmt.Errorf("control: read candidates: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var ip string
+		if err := rows.Scan(&ip); err != nil {
+			return nil, fmt.Errorf("control: scan candidate: %w", err)
+		}
+		out = append(out, ip)
+	}
+	return out, rows.Err()
 }

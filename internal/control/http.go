@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -15,6 +17,11 @@ import (
 
 // defaultListenPort is the WireGuard port a relay is told to listen on.
 const defaultListenPort = 51820
+
+// maxObservationsPerReport bounds one batch. A capture session sees a handful of
+// distinct servers, not thousands; a report far past this is a client sending
+// something other than game destinations.
+const maxObservationsPerReport = 500
 
 // Backend is the part of Store the handlers use. Narrowed to an interface so
 // handler tests need no database.
@@ -27,6 +34,7 @@ type Backend interface {
 	Session(ctx context.Context, contributorKey, devicePubKey string, mtu int) (api.SessionResponse, error)
 	Profile(ctx context.Context) (api.ProfileResponse, error)
 	ReleaseDevice(ctx context.Context, contributorKey, deviceID string) error
+	RecordObservation(ctx context.Context, contributorKey, gameID, dstIP string, dstPort int) error
 	DesiredState(ctx context.Context, relayID string) ([]api.Peer, []string, error)
 }
 
@@ -70,6 +78,7 @@ func NewServer(b Backend, pollSecs int, trustProxy bool) http.Handler {
 	mux.HandleFunc("/v1/session", s.handleSession)
 	mux.HandleFunc("/v1/profile", s.handleProfile)
 	mux.HandleFunc("/v1/devices/", s.handleDevices)
+	mux.HandleFunc("/v1/observations", s.handleObservations)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok\n"))
@@ -240,6 +249,54 @@ func (s *server) handleDevices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *server) handleObservations(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "use POST", "")
+		return
+	}
+	var req api.ObservationReport
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "malformed JSON body", "")
+		return
+	}
+	if req.ContributorKey == "" || req.GameID == "" {
+		writeErr(w, http.StatusBadRequest, "contributor_key and game_id are required", "")
+		return
+	}
+	if len(req.Observations) > maxObservationsPerReport {
+		writeErr(w, http.StatusRequestEntityTooLarge,
+			fmt.Sprintf("at most %d observations per report", maxObservationsPerReport), "")
+		return
+	}
+	if !s.limit(w, r, req.ContributorKey) {
+		return
+	}
+
+	out := api.ObservationAccepted{}
+	for _, o := range req.Observations {
+		// Validate here, not at build time. A malformed address stored now is a
+		// malformed address someone has to explain later, and the profile builder
+		// would silently discard it as unverified with no trace of where it came
+		// from. Private and loopback space is rejected outright: a game server is
+		// not on 10.0.0.0/8, so an address there means the capture attributed local
+		// traffic to the game.
+		addr, err := netip.ParseAddr(o.DstIP)
+		if err != nil || !addr.Is4() || addr.IsPrivate() || addr.IsLoopback() ||
+			addr.IsLinkLocalUnicast() || addr.IsMulticast() ||
+			o.DstPort < 1 || o.DstPort > 65535 {
+			out.Rejected++
+			continue
+		}
+		if err := s.b.RecordObservation(r.Context(), req.ContributorKey, req.GameID, addr.String(), o.DstPort); err != nil {
+			log.Printf("observation: %v", err)
+			writeErr(w, http.StatusInternalServerError, "could not store the report", "")
+			return
+		}
+		out.Accepted++
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

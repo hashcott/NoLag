@@ -35,6 +35,12 @@ type fakeBackend struct {
 	sessErr    error
 	prof       api.ProfileResponse
 	releaseErr error
+	obs        []api.Observation
+}
+
+func (f *fakeBackend) RecordObservation(_ context.Context, _, _, ip string, port int) error {
+	f.obs = append(f.obs, api.Observation{DstIP: ip, DstPort: port})
+	return nil
 }
 
 func (f *fakeBackend) ActivateDevice(_ context.Context, _, _, _ string) (string, []api.DeviceSummary, error) {
@@ -431,5 +437,63 @@ func TestReleaseRejectsAPathWithNoID(t *testing.T) {
 	NewServer(&fakeBackend{}, 10, false).ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", rec.Code)
+	}
+}
+
+// A game server is not on 10.0.0.0/8. An address there means the capture
+// attributed the machine's own local traffic to the game, and storing it would
+// put a private range into a profile that every client routes into a tunnel.
+func TestObservationsRejectUnroutableAddresses(t *testing.T) {
+	b := &fakeBackend{}
+	rec := post(t, NewServer(b, 10, false), "/v1/observations", "", api.ObservationReport{
+		ContributorKey: "GNL-AAAA-BBBB-CCCC-DDDD",
+		GameID:         "pubg",
+		Observations: []api.Observation{
+			{DstIP: "20.24.50.9", DstPort: 20522},  // good
+			{DstIP: "10.0.0.5", DstPort: 20522},    // private
+			{DstIP: "127.0.0.1", DstPort: 20522},   // loopback
+			{DstIP: "169.254.1.1", DstPort: 20522}, // link-local
+			{DstIP: "224.0.0.1", DstPort: 20522},   // multicast
+			{DstIP: "not-an-ip", DstPort: 20522},   // malformed
+			{DstIP: "20.24.50.9", DstPort: 0},      // no port
+		},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body)
+	}
+	var out api.ObservationAccepted
+	json.Unmarshal(rec.Body.Bytes(), &out)
+	if out.Accepted != 1 || out.Rejected != 6 {
+		t.Errorf("accepted %d rejected %d, want 1 and 6", out.Accepted, out.Rejected)
+	}
+	if len(b.obs) != 1 || b.obs[0].DstIP != "20.24.50.9" {
+		t.Errorf("stored %+v, want only the routable address", b.obs)
+	}
+}
+
+// A capture session sees a handful of distinct servers. A report far past that
+// is a client sending something other than game destinations.
+func TestObservationsBoundTheBatchSize(t *testing.T) {
+	var many []api.Observation
+	for i := 0; i < maxObservationsPerReport+1; i++ {
+		many = append(many, api.Observation{DstIP: "20.24.50.9", DstPort: 20522})
+	}
+	rec := post(t, NewServer(&fakeBackend{}, 10, false), "/v1/observations", "", api.ObservationReport{
+		ContributorKey: "GNL-A", GameID: "pubg", Observations: many,
+	})
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("status = %d, want 413", rec.Code)
+	}
+}
+
+func TestObservationsRequireKeyAndGame(t *testing.T) {
+	for _, r := range []api.ObservationReport{
+		{GameID: "pubg"},
+		{ContributorKey: "GNL-A"},
+	} {
+		rec := post(t, NewServer(&fakeBackend{}, 10, false), "/v1/observations", "", r)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("status = %d for %+v, want 400", rec.Code, r)
+		}
 	}
 }

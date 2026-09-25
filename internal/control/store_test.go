@@ -641,37 +641,73 @@ func TestPublishRefusesAnEmptyProfile(t *testing.T) {
 	}
 }
 
-func TestObservationsAccumulateReportCounts(t *testing.T) {
+// The promotion rule is "three INDEPENDENT contributors". One person reporting
+// the same address three times must not satisfy it - that is precisely the case
+// the rule exists to exclude, and a wrong CIDR drags unrelated traffic through
+// somebody else's relay.
+func TestOneContributorCannotPromoteAnAddressAlone(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
+	solo, _ := s.CreateContributorKey(ctx)
 
-	for i := 0; i < 3; i++ {
-		if err := s.RecordObservation(ctx, "pubg", "20.24.50.9", 20522); err != nil {
+	for i := 0; i < 5; i++ {
+		if err := s.RecordObservation(ctx, solo, "pubg", "20.24.50.9", 20522); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := s.RecordObservation(ctx, "pubg", "20.24.51.4", 20522); err != nil {
-		t.Fatal(err)
-	}
-
-	var reports int
-	s.pool.QueryRow(ctx,
-		`SELECT reports FROM observed_address WHERE dst_ip = '20.24.50.9'`).Scan(&reports)
-	if reports != 3 {
-		t.Errorf("reports = %d after three sightings, want 3: the three-tier rule "+
-			"needs to tell one contributor's lead from several independent ones", reports)
-	}
-
-	got, err := s.ObservedAddresses(ctx, "pubg")
+	got, err := s.CandidateAddresses(ctx, "pubg", 3)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 {
-		t.Errorf("observed %v, want the two distinct addresses", got)
+	if len(got) != 0 {
+		t.Errorf("candidates = %v after five reports from ONE contributor; the rule "+
+			"counts independent contributors, not reports", got)
 	}
-	// A different game must not see them.
-	other, _ := s.ObservedAddresses(ctx, "cs2")
+}
+
+func TestThreeIndependentContributorsPromoteAnAddress(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+
+	var keys []string
+	for i := 0; i < 3; i++ {
+		k, _ := s.CreateContributorKey(ctx)
+		keys = append(keys, k)
+	}
+	for _, k := range keys {
+		if err := s.RecordObservation(ctx, k, "pubg", "20.24.50.9", 20522); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A second address seen by only two of them stays below the bar.
+	for _, k := range keys[:2] {
+		if err := s.RecordObservation(ctx, k, "pubg", "20.24.51.4", 20522); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := s.CandidateAddresses(ctx, "pubg", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != "20.24.50.9" {
+		t.Errorf("candidates = %v, want only the address three contributors saw", got)
+	}
+}
+
+func TestObservationsAreScopedPerGame(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	k, _ := s.CreateContributorKey(ctx)
+	if err := s.RecordObservation(ctx, k, "pubg", "20.24.50.9", 20522); err != nil {
+		t.Fatal(err)
+	}
+	other, err := s.ObservedAddresses(ctx, "cs2")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(other) != 0 {
-		t.Errorf("another game sees %v; mixing two games' addresses cannot be undone", other)
+		t.Errorf("another game sees %v; once two games' addresses are mixed there is "+
+			"no separating them", other)
 	}
 }

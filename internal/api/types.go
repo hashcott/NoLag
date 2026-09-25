@@ -150,6 +150,29 @@ type ProfileResponse struct {
 	CIDRs   []string `json:"cidrs"`
 }
 
+// Observation is one address a client saw the game talking to.
+//
+// Destination and port only. The client sends nothing about the traffic itself
+// and nothing identifying the player; this exists to find where a game's servers
+// live, not to record what anybody did.
+type Observation struct {
+	DstIP   string `json:"dst_ip"`
+	DstPort int    `json:"dst_port"`
+}
+
+// ObservationReport is a batch from one client.
+type ObservationReport struct {
+	ContributorKey string        `json:"contributor_key"`
+	GameID         string        `json:"game_id"`
+	Observations   []Observation `json:"observations"`
+}
+
+// ObservationAccepted says how many of the batch were stored.
+type ObservationAccepted struct {
+	Accepted int `json:"accepted"`
+	Rejected int `json:"rejected"`
+}
+
 // ErrorResponse is the body of every non-2xx reply.
 type ErrorResponse struct {
 	Error string `json:"error"`

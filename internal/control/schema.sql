@@ -83,20 +83,22 @@ CREATE SEQUENCE IF NOT EXISTS relay_octet_seq START 77 MAXVALUE 255;
 
 -- Addresses contributors have seen carrying a game's traffic.
 --
--- Destination only. Not the payload, not the source address, not who reported
--- it: building a profile needs where the game lives and nothing else, and
--- keeping more would turn this into a record of what people were doing.
+-- Destination only. Not the payload, not the source address: building a profile
+-- needs where the game lives and nothing else, and keeping more would turn this
+-- into a record of what people were doing.
+--
+-- The reporting key IS part of the key, because the promotion rule is "three
+-- INDEPENDENT contributors". Counting reports instead would let one person
+-- reporting the same address three times promote it on their own - which is
+-- exactly the case the rule exists to exclude.
 CREATE TABLE IF NOT EXISTS observed_address (
     game_id    TEXT        NOT NULL,
     dst_ip     TEXT        NOT NULL,
     dst_port   INT         NOT NULL,
-    -- How many separate reports have named this address. The three-tier rule
-    -- (observed -> candidate -> active) reads this: one contributor seeing an
-    -- address is a lead, several independently seeing it is evidence.
-    reports    INT         NOT NULL DEFAULT 1,
+    key_hash   TEXT        NOT NULL,
     first_seen TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_seen  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (game_id, dst_ip, dst_port)
+    PRIMARY KEY (game_id, dst_ip, dst_port, key_hash)
 );
 
 CREATE INDEX IF NOT EXISTS relay_status_idx     ON relay (status, last_seen);
