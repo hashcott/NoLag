@@ -1,7 +1,7 @@
 # P1 Runbook: bringing up the control plane and the first relay
 
 Prerequisite: `gnl-analyze` from P0 has returned GO, and you know which provider
-won. See `docs/superpowers/plans/2026-09-14-p0-route-measurement.md`.
+won. P0 is the measurement campaign described in `docs/p0-runbook.md`.
 
 ## 1. Control plane
 

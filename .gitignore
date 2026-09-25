@@ -10,3 +10,9 @@
 
 # Subagent-driven-development workspace (scratch, per-plan)
 .superpowers/
+
+# Design spec and implementation plans. Kept out of the published repo
+# deliberately: they carry the security reasoning - where the egress allowlist
+# can fail open, what a relay operator can see - which is useful to have written
+# down and not useful to hand to everyone.
+docs/superpowers/
