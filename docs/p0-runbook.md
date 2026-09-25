@@ -272,7 +272,13 @@ running, do not write the provider off.
 `-min-runs` lowers the floor. Use it only to inspect a partial campaign, never to
 reach a GO.
 
-Exit code 0 means GO, exit code 1 means NO-GO.
+Exit code 0 means GO, 1 means NO-GO, and **2 means the campaign could not be
+judged at all** — no candidate could be evaluated, or the window flags were
+invalid. Treat 2 as "go and look at the data", never as a verdict about a
+provider: it usually means a leg is missing entirely, or `-from`/`-to` names do
+not match across hosts, or the window does not cover when the data was
+collected. A script wiring this gate must distinguish 2 from 1; they mean
+opposite things about whether the measurement worked.
 
 ## What each outcome means
 
