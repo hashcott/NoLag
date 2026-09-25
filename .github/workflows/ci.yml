@@ -3,6 +3,9 @@ name: ci
 on:
   push:
     branches: [main]
+    # A version tag builds everything, runs the installer end to end, and
+    # publishes a GitHub release.
+    tags: ['v*']
   pull_request:
 
 permissions:
@@ -88,6 +91,8 @@ jobs:
           for c in gnl-agent gnl-control gnl-probe gnl-analyze gnl-profile gnl-relaycheck; do
             go build -trimpath -o dist/linux/$c ./cmd/$c
           done
+          # The relay installer expects gnl-agent beside it.
+          cp deploy/relay-v1.sh dist/linux/
       - name: Windows client (windows/amd64)
         env:
           GOOS: windows
@@ -112,3 +117,133 @@ jobs:
           name: gamenolag-windows-amd64
           path: dist/windows/
           if-no-files-found: error
+
+  installer:
+    # Builds GameNoLag-Setup.exe, then installs it for real on a Windows runner,
+    # talks to the service over its pipe, and uninstalls it. Nothing else in CI
+    # runs the client as a Windows service.
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: gamenolag-windows-amd64
+          path: payload
+      - name: version
+        id: version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=0.0.0-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+      - name: build the installer
+        shell: pwsh
+        env:
+          # Optional repository variable; empty leaves the field for the player.
+          DEFAULT_CONTROL_URL: ${{ vars.GNL_CONTROL_URL }}
+        run: |
+          Copy-Item LICENSE payload\
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue)) {
+            $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+            if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress | Out-Null }
+            $env:PATH += ";${env:ProgramFiles(x86)}\Inno Setup 6"
+          }
+          iscc /Q "/DAppVersion=${{ steps.version.outputs.value }}" "/DPayloadDir=$PWD\payload" `
+               "/DDefaultControlUrl=$env:DEFAULT_CONTROL_URL" "/O$PWD\dist" deploy\windows\gamenolag.iss
+          if ($LASTEXITCODE -ne 0) { throw "iscc failed" }
+          Get-ChildItem dist
+      - name: install, use and uninstall it
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = (Get-ChildItem dist\GameNoLag-Setup-*.exe).FullName
+          $common = '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
+
+          # A key that is not a key is refused before anything is written.
+          $p = Start-Process $setup -ArgumentList ($common + '/KEY=not;a-key', '/URL=https://example.invalid') -Wait -PassThru
+          if ($p.ExitCode -eq 0) { throw "setup accepted an invalid key" }
+          if (Get-Service GameNoLag -ErrorAction SilentlyContinue) { throw "installed with an invalid key" }
+          $p = Start-Process $setup -ArgumentList ($common + '/KEY=GNL-TEST-TEST-TEST-TEST', '/URL=http://example.invalid') -Wait -PassThru
+          if ($p.ExitCode -eq 0) { throw "setup accepted a plain-http control URL" }
+
+          $p = Start-Process $setup -ArgumentList ($common + '/KEY=GNL-TEST-TEST-TEST-TEST', '/URL=https://example.invalid', '/LOG=setup.log') -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content setup.log; throw "setup exited $($p.ExitCode)" }
+
+          $svc = Get-Service GameNoLag
+          if ($svc.Status -ne 'Running') { throw "service is $($svc.Status)" }
+          foreach ($f in 'gnl-service.exe', 'gnl-ui.exe', 'gnl-ui.exe.manifest', 'uninstall.ps1') {
+            if (-not (Test-Path "$env:ProgramFiles\GameNoLag\$f")) { throw "missing $f" }
+          }
+          $cfg = Get-Content "$env:ProgramData\GameNoLag\config.json" -Raw | ConvertFrom-Json
+          if ($cfg.contributor_key -ne 'GNL-TEST-TEST-TEST-TEST') { throw "config.json not written" }
+          # The data directory holds the private key: only SYSTEM and Administrators.
+          $readers = (Get-Acl "$env:ProgramData\GameNoLag").Access |
+            Where-Object { $_.IdentityReference -notmatch 'SYSTEM|Administrators' }
+          if ($readers) { throw "data directory readable by: $($readers.IdentityReference -join ', ')" }
+
+          # The pipe answers status, and refuses anything outside the four verbs.
+          function Ask($line) {
+            $pipe = New-Object System.IO.Pipes.NamedPipeClientStream('.', 'GameNoLag', [System.IO.Pipes.PipeDirection]::InOut)
+            $pipe.Connect(15000)
+            $w = New-Object System.IO.StreamWriter($pipe); $w.AutoFlush = $true
+            $r = New-Object System.IO.StreamReader($pipe)
+            $w.WriteLine($line)
+            $reply = $r.ReadLine()
+            $pipe.Dispose()
+            return $reply | ConvertFrom-Json
+          }
+          $status = Ask '{"verb":"status"}'
+          if ($status.state -ne 'disconnected') { throw "status replied $($status | ConvertTo-Json -Compress)" }
+          $refused = Ask '{"verb":"shutdown"}'
+          if ($refused.ok) { throw "the pipe accepted an unknown verb" }
+
+          # Uninstall. The uninstaller hands over to a copy of itself, so wait for
+          # the effect rather than the process.
+          Start-Process "$env:ProgramFiles\GameNoLag\unins000.exe" -ArgumentList $common -Wait
+          for ($i = 0; $i -lt 60 -and (Get-Service GameNoLag -ErrorAction SilentlyContinue); $i++) { Start-Sleep 1 }
+          if (Get-Service GameNoLag -ErrorAction SilentlyContinue) { throw "service survived uninstall" }
+          if (Test-Path "$env:ProgramFiles\GameNoLag\gnl-service.exe") { throw "binary survived uninstall" }
+          if (-not (Test-Path "$env:ProgramData\GameNoLag\device.key")) { throw "uninstall removed the device identity" }
+          Write-Host "installer: refused bad input, installed, answered on the pipe, uninstalled cleanly"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gamenolag-setup
+          path: dist/GameNoLag-Setup-*.exe
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, installer]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: assemble
+        run: |
+          set -euo pipefail
+          v="${GITHUB_REF_NAME}"
+          mkdir release
+          cp artifacts/gamenolag-setup/GameNoLag-Setup-*.exe release/
+          (cd artifacts/gamenolag-windows-amd64 && zip -q -r "../../release/gamenolag-windows-amd64-$v.zip" .)
+          chmod +x artifacts/gamenolag-linux-amd64/*
+          tar -C artifacts/gamenolag-linux-amd64 -czf "release/gamenolag-linux-amd64-$v.tar.gz" .
+          # Loose, with their own checksums, because the relay guide has a
+          # contributor fetch exactly these two and check them.
+          cp artifacts/gamenolag-linux-amd64/relay-v1.sh artifacts/gamenolag-linux-amd64/gnl-agent release/
+          (cd release && for f in relay-v1.sh gnl-agent; do sha256sum "$f" > "$f.sha256"; done)
+          (cd release && sha256sum * > SHA256SUMS)
+          ls -l release
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" release/* \
+            --repo "$GITHUB_REPOSITORY" --title "GameNoLag $GITHUB_REF_NAME" \
+            --generate-notes --verify-tag
+

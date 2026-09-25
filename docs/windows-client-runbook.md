@@ -54,7 +54,7 @@ next to `deploy/windows/install.ps1` on the target machine, then from an
 administrator PowerShell:
 
 ```powershell
-.\install.ps1 -ContributorKey GNL-XXXX-XXXX-XXXX -ControlUrl https://api.example.com
+.\install.ps1 -ContributorKey GNL-XXXX-XXXX-XXXX-XXXX -ControlUrl https://api.example.com
 ```
 
 The script refuses a non-https control URL, because the contributor key travels
@@ -156,7 +156,7 @@ machine with a `games` array in `config.json`:
 ```json
 {
   "control_url": "https://api.example.com",
-  "contributor_key": "GNL-XXXX-XXXX-XXXX",
+  "contributor_key": "GNL-XXXX-XXXX-XXXX-XXXX",
   "games": [{ "id": "pubg", "process_names": ["TslGame.exe"] }]
 }
 ```

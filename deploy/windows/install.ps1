@@ -64,6 +64,11 @@ if ($existing) {
   Start-Sleep -Seconds 2
 }
 
+# The tray holds gnl-ui.exe open the same way. The setup wizard starts it again
+# for the player at the end; from a shell, it comes back at the next logon or
+# from the Start Menu.
+Get-Process -Name 'gnl-ui' -ErrorAction SilentlyContinue | Stop-Process -Force
+
 New-Item -ItemType Directory -Force -Path $installDir, $dataDir | Out-Null
 foreach ($file in $payload) {
   Copy-Item -Path (Join-Path $SourceDir $file) -Destination (Join-Path $installDir $file) -Force

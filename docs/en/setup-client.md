@@ -19,9 +19,43 @@ see the [user guide](user-guide.md).
 - Administrator rights to install. Daily use needs none.
 - A contributor key and the control-plane URL, from the operator.
 
-## 1. Get the bundle
+## 1. Install with the setup wizard
 
-The CI artifact `gamenolag-windows-amd64` holds everything, side by side:
+Every release carries **`GameNoLag-Setup-<version>.exe`**
+([releases](https://github.com/hashcott/NoLag/releases/latest)). It asks for the
+contributor key and the control-plane address, installs, and starts the tray for
+the person who ran it. Upgrading is running a newer setup over the old one.
+Uninstalling is **Settings → Apps → GameNoLag → Uninstall**.
+
+For several machines, run it silently:
+
+```powershell
+GameNoLag-Setup-1.2.3.exe /VERYSILENT /SUPPRESSMSGBOXES /KEY=GNL-XXXX-XXXX-XXXX-XXXX /URL=https://cp.example.com
+```
+
+Exit code `0` means installed. Anything else means it was not: an invalid key,
+a non-`https` address, or a failure in `install.ps1`. Add `/LOG=setup.log` for
+the details.
+
+The wizard is a thin shell around `install.ps1`. It checks the key and address
+against a narrow alphabet, then runs the script with them, so both ways of
+installing leave the machine in exactly the same state. CI builds the wizard on
+every push, installs it on a Windows runner, queries the service over its pipe,
+and uninstalls it again.
+
+To build the wizard yourself you need [Inno Setup 6](https://jrsoftware.org/isinfo.php):
+
+```powershell
+iscc /DAppVersion=1.2.3 /DPayloadDir=C:\path\to\bundle /DDefaultControlUrl=https://cp.example.com deploy\windows\gamenolag.iss
+```
+
+`DefaultControlUrl` pre-fills the address field, so players only paste their
+key. In CI it comes from the repository variable `GNL_CONTROL_URL`.
+
+## 2. Install from the bundle, by script
+
+The release's `gamenolag-windows-amd64-<version>.zip`, or the CI artifact of
+the same name, holds the five files side by side:
 
 | File | What it is |
 |---|---|
@@ -30,7 +64,7 @@ The CI artifact `gamenolag-windows-amd64` holds everything, side by side:
 | `gnl-ui.exe.manifest` | **Must stay next to `gnl-ui.exe`.** Without it the tray menu is not created and the icon is blurry on high-DPI screens |
 | `install.ps1`, `uninstall.ps1` | Installer and uninstaller |
 
-To build it yourself on any OS:
+To build the bundle yourself on any OS:
 
 ```bash
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -o dist/gnl-service.exe ./cmd/gnl-service
@@ -38,20 +72,17 @@ GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags -H=windowsgu
 cp deploy/windows/gnl-ui.exe.manifest deploy/windows/*.ps1 dist/
 ```
 
-## 2. Install
-
 In an **administrator** PowerShell, in the folder holding the bundle:
 
 ```powershell
 Unblock-File .\*.ps1, .\*.exe
-.\install.ps1 -ContributorKey GNL-XXXX-XXXX-XXXX -ControlUrl https://cp.example.com
+.\install.ps1 -ContributorKey GNL-XXXX-XXXX-XXXX-XXXX -ControlUrl https://cp.example.com
 ```
 
 `Unblock-File` removes the "downloaded from the internet" mark. Without it,
-PowerShell refuses to run an unsigned downloaded script. The installer refuses
-a non-`https` control URL, because the key travels as a bearer token.
+PowerShell refuses to run an unsigned downloaded script.
 
-What it does:
+### What either way does
 
 | Where | What |
 |---|---|
@@ -60,9 +91,11 @@ What it does:
 | Service `GameNoLag` | Registered to start automatically. The tunnel does not start until the UI asks for a connect |
 | Start Menu, logon | A *GameNoLag* shortcut, and the tray set to start at every logon |
 
-The installer does **not** launch the tray. It runs elevated, so anything it
-started would run elevated and land in the administrator's session. Start
-*GameNoLag* from the Start Menu, or log out and back in.
+Both refuse a non-`https` control URL, because the key travels as a bearer
+token. A running service and tray are stopped before their files are replaced.
+`install.ps1` on its own does **not** launch the tray: it runs elevated, and the
+tray would land in the administrator's session. The wizard starts it as the
+original, unelevated user instead.
 
 ## 3. Configuration
 
@@ -71,7 +104,7 @@ started would run elevated and land in the administrator's session. Start
 ```json
 {
   "control_url": "https://cp.example.com",
-  "contributor_key": "GNL-XXXX-XXXX-XXXX",
+  "contributor_key": "GNL-XXXX-XXXX-XXXX-XXXX",
   "games": [
     { "id": "pubg", "process_names": ["TslGame.exe"] }
   ]
@@ -132,6 +165,12 @@ psexec -s -i "C:\Program Files\GameNoLag\gnl-service.exe"
 ```
 
 ## 6. Uninstall
+
+Installed with the wizard: **Settings → Apps → GameNoLag → Uninstall**, or
+`"C:\Program Files\GameNoLag\unins000.exe" /VERYSILENT` from a script. It runs
+`uninstall.ps1` and keeps this machine's identity.
+
+By script, in an administrator PowerShell:
 
 ```powershell
 .\uninstall.ps1          # keeps this machine's identity and its device slot

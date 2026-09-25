@@ -12,31 +12,26 @@ This guide is for players. For installing and packaging, see
 
 - Windows 10 or 11, 64-bit.
 - Administrator rights to install. After that, everyday use needs none.
-- A **contributor key** (`GNL-XXXX-XXXX-XXXX`) from the operator, given when
+- A **contributor key** (`GNL-XXXX-XXXX-XXXX-XXXX`) from the operator, given when
   you contribute a VPS. One key activates up to **3 PCs**.
 - The **control-plane address** (starts with `https://`), also from the
   operator.
-- The `gamenolag-windows-amd64` bundle: `gnl-service.exe`, `gnl-ui.exe`,
-  `gnl-ui.exe.manifest`, `install.ps1`, `uninstall.ps1`.
 
 ## Installing
 
-1. Extract the bundle into a folder, for example `Downloads\gamenolag`. Keep the
-   five files together.
-2. Open **PowerShell as Administrator**: Start, type `PowerShell`, right-click,
-   then *Run as administrator*.
-3. Run:
+1. Download **`GameNoLag-Setup-<version>.exe`** from the
+   [latest release](https://github.com/hashcott/NoLag/releases/latest).
+2. Double-click it. Windows asks for administrator permission; allow it.
+   Until the installer is code-signed, Windows SmartScreen may say *Windows
+   protected your PC*. Click **More info → Run anyway**, but only for a file
+   you downloaded from the release page above.
+3. Accept the licence, then enter your **contributor key** and the
+   **control-plane address**. The address may already be filled in.
+4. Finish with **Start GameNoLag** ticked. The icon appears in the notification
+   area, and from now on it starts by itself every time you log in.
 
-   ```powershell
-   cd $HOME\Downloads\gamenolag
-   Unblock-File .\*.ps1, .\*.exe
-   .\install.ps1 -ContributorKey GNL-XXXX-XXXX-XXXX -ControlUrl https://cp.example.com
-   ```
-
-   Replace the key and the address with yours. `Unblock-File` is needed because
-   Windows blocks downloaded scripts.
-4. Start **GameNoLag** from the Start Menu, or log out and back in. From then
-   on it starts by itself at every logon.
+Upgrading works the same way: run the newer setup over the old one. Your PC
+keeps its identity, so no extra device slot is used.
 
 ## Everyday use
 
@@ -118,7 +113,7 @@ ordinary path, and GameNoLag retries every 30 seconds.
 |---|---|---|
 | *The GameNoLag service is not running* | The service stopped | Administrator PowerShell: `Start-Service GameNoLag` |
 | *no relay answered* after Connect | Your network blocks UDP (common on office or café networks) | Try another network. Your game still works on the ordinary path |
-| *no device slots left* | The key already has 3 PCs | Uninstall with `-Purge` on a PC you no longer use, or ask the operator |
+| *no device slots left* | The key already has 3 PCs | Remove the identity on a PC you no longer use (see Uninstalling), or ask the operator |
 | Red icon with a bar | Connected but faulty | Read the error in the full window. It usually recovers; if not, Disconnect then Connect |
 | *Open log folder*: Access denied | The folder holds your private key, so only administrators can read it | Expected. The log is `C:\ProgramData\GameNoLag\service.log`; open it with Notepad run as Administrator |
 | No internet at all, and you suspect GameNoLag | — | `Stop-Service GameNoLag`, or reboot. Every GameNoLag route disappears as soon as the service stops |
@@ -128,15 +123,19 @@ happened.
 
 ## Uninstalling
 
-In an administrator PowerShell, in the folder with `uninstall.ps1`:
+**Settings → Apps → Installed apps → GameNoLag → Uninstall.** This removes the
+program and keeps this PC's identity, so reinstalling later uses no extra device
+slot.
+
+To also free the slot, because you are giving the PC away for example, remove
+the identity too. In an administrator PowerShell:
 
 ```powershell
-.\uninstall.ps1          # removes the program, keeps this PC's identity
-.\uninstall.ps1 -Purge   # also removes the identity
+Remove-Item -Recurse -Force "$env:ProgramData\GameNoLag"
 ```
 
-Without `-Purge`, a later reinstall is the same PC and uses no extra slot. With
-it, the next install counts as a new PC and uses another slot.
+The next install then counts as a new PC. The operator can also free the slot
+for you.
 
 ## Privacy
 
