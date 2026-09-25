@@ -36,7 +36,14 @@ func Serve(ctx context.Context, conn net.PacketConn) error {
 		// Echo the first PacketSize bytes verbatim: the client reads its own send
 		// time back out of the echo to compute RTT.
 		if _, err := conn.WriteTo(buf[:PacketSize], addr); err != nil {
-			return err
+			// Drop this echo and keep serving, exactly as the client does on its own
+			// write errors. A transient ENOBUFS or a pending ICMP error costs one
+			// sample; returning here would exit the process, and with Restart=always,
+			// RestartSec=2 and systemd's default 5-starts-in-10s limit a short burst
+			// would leave the unit failed for the rest of the campaign. The landmark
+			// then goes dark and every leg A and C against it becomes a 100%-loss
+			// record - which is the measurement failure the analyser must not be fed.
+			continue
 		}
 	}
 }
