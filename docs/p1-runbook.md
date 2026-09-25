@@ -277,11 +277,13 @@ Until this passes, do not hand the installer to anybody.
 
 ## What is deliberately not here
 
-- **Client.** P2. Until then, peers are bound by hand as in step 5.
+`trusted_after` is enforced now: `/v1/session` offers only relays that are `up`
+and whose `trusted_after` has passed.
+
+- **Client.** Not part of P1; it now exists and is covered by
+  `docs/windows-client-runbook.md`. Step 5 binds a peer by hand, which is still
+  the quickest way to test a relay without one.
 - **Automatic relay verification.** `gnl-relaycheck` is run by a person. Wiring
   it into the control plane on a schedule is worth doing once there are more
   relays than one person wants to check.
 - **Contributor dashboard.** P6.
-- **`trusted_after` enforcement.** The column is populated at registration, but
-  nothing reads it yet because there is no client fetching a relay list. That
-  lands with `/v1/session` in P3.
