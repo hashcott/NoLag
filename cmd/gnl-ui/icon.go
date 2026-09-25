@@ -29,9 +29,10 @@ var iconColours = map[state]color.NRGBA{
 // Drawn rather than shipped as a resource: an .ico has to be compiled into the
 // binary by a tool that does not run on the machine this is built on, and the
 // tray icon is the only part of this product that is visible all the time. A
-// ring means idle and a filled ring means traffic is going through a relay, so
-// the two are distinct in shape as well as colour — a quarter of the men who
-// might use this cannot rely on the colour alone.
+// ring means idle, a filled ring means traffic is going through a relay, and a
+// ring barred across the middle means connected but faulty, so all three are
+// distinct in shape as well as colour — a quarter of the men who might use this
+// cannot rely on the colour alone.
 func trayIcon(s state, size int) image.Image {
 	if size < 8 {
 		size = 8
@@ -43,6 +44,7 @@ func trayIcon(s state, size int) image.Image {
 	outer := float64(size) * 0.46
 	inner := float64(size) * 0.30 // the hole in the ring
 	dot := float64(size) * 0.20   // the filled centre, when connected
+	bar := float64(size) * 0.09   // half the thickness of the fault bar
 
 	// Four samples per axis. Enough that the curve does not look like a staircase
 	// at sixteen pixels, and cheap at this size.
@@ -60,6 +62,10 @@ func trayIcon(s state, size int) image.Image {
 						continue
 					}
 					if s == stateOn && d <= dot {
+						covered++
+						continue
+					}
+					if s == stateFault && d < inner && math.Abs(py-centre) <= bar {
 						covered++
 					}
 				}

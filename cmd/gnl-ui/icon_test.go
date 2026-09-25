@@ -70,3 +70,23 @@ func TestATinySizeStillDraws(t *testing.T) {
 		t.Fatal("an 8-pixel icon is blank")
 	}
 }
+
+func TestFaultDiffersFromIdleAndConnectedInShape(t *testing.T) {
+	// Fault is red and idle is grey: to somebody with red-green colour blindness
+	// those can read as the same, so the icon that says "something is wrong" must
+	// not be the idle ring in another colour.
+	const size = 32
+	mid := size / 2
+	if a := at(trayIcon(stateFault, size), mid, mid).A; a == 0 {
+		t.Error("the fault icon has a hollow centre, the same shape as idle")
+	}
+	// Inside the hole but outside the connected dot: the bar reaches here, the
+	// dot does not, so fault cannot be read as connected either.
+	side := mid + size/4
+	if a := at(trayIcon(stateFault, size), side, mid).A; a == 0 {
+		t.Error("the fault bar does not reach across the hole")
+	}
+	if a := at(trayIcon(stateOn, size), side, mid).A; a != 0 {
+		t.Error("the connected dot reaches where the fault bar is, so the two share a shape")
+	}
+}
