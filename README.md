@@ -1,6 +1,9 @@
 # GameNoLag
 
 [![ci](https://github.com/hashcott/NoLag/actions/workflows/ci.yml/badge.svg)](https://github.com/hashcott/NoLag/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
+**English** · [Tiếng Việt](README.vi.md) · [简体中文](README.zh-CN.md)
 
 GameNoLag sends a game's traffic from a player in Vietnam through a WireGuard
 relay near the game servers, for the hours when that path beats the ISP's
@@ -151,14 +154,27 @@ Without the manifest the tray menu is not created.
 
 ## Documentation
 
-| Document | For |
+Full documentation in [English](docs/en/README.md),
+[Tiếng Việt](docs/vi/README.md) and [简体中文](docs/zh-CN/README.md).
+
+| Guide | For |
 |---|---|
-| [Hướng dẫn sử dụng](docs/user-guide.vi.md) | Players: install, use, troubleshoot, uninstall (Vietnamese) |
-| [Windows client runbook](docs/windows-client-runbook.md) | How the client works, state on disk, logs, the manual Windows checklist |
-| [P1 runbook](docs/p1-runbook.md) | Bringing up the control plane and the first relay, contributor setup |
-| [P0 runbook](docs/p0-runbook.md) | The route-quality measurement campaign and how to read its answer |
+| [User guide](docs/en/user-guide.md) | Players: install, use, troubleshoot, uninstall |
+| [Setting up the client](docs/en/setup-client.md) | Installing, configuring and packaging the Windows client |
+| [Setting up a relay](docs/en/setup-relay.md) | Contributors running a relay on a VPS |
+| [Setting up the control plane](docs/en/setup-control-plane.md) | Operators: Postgres, TLS, keys, verifying relays, game profiles |
+| [Architecture](docs/en/architecture.md) | How the parts fit, the API, relay lifecycle, security boundaries |
 
-## Licence
+Deep references: the [Windows client runbook](docs/windows-client-runbook.md),
+[P1 runbook](docs/p1-runbook.md) and [P0 runbook](docs/p0-runbook.md).
 
-There is no licence file yet. Until one is added, the code is all rights
-reserved.
+## Contributing
+
+Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) first, and
+report vulnerabilities privately as described in [SECURITY.md](SECURITY.md),
+not in a public issue. Everyone taking part follows the
+[Code of Conduct](CODE_OF_CONDUCT.md).
+
+## License
+
+[Apache License 2.0](LICENSE).

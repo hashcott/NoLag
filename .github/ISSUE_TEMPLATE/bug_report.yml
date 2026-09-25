@@ -1,0 +1,45 @@
+name: Bug report
+description: Something does not work as documented
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Do not report security issues here.** See SECURITY.md.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Windows client (tray, window, service)
+        - Relay (gnl-agent, relay-v1.sh)
+        - Control plane (gnl-control, gnl-profile)
+        - Measurement (gnl-probe, gnl-analyze)
+        - Documentation
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: platform
+    attributes:
+      label: Platform
+      description: OS and version, and the build or commit. For a relay, the VPS provider and kernel; for a client, the ISP.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: The relevant part of service.log or journalctl. Remove contributor keys and tokens before pasting.
+      render: text
