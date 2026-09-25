@@ -3,6 +3,36 @@
 Prerequisite: `gnl-analyze` from P0 has returned GO, and you know which provider
 won. P0 is the measurement campaign described in `docs/p0-runbook.md`.
 
+## Verifying the firewall without a VM
+
+`deploy/verify-on-linux.sh` is still the gate before anyone's traffic goes near
+a relay: it needs systemd, the WireGuard kernel module and a live control plane,
+and it has to run on a machine you are willing to destroy.
+
+Part of that gap closes without one:
+
+```
+./deploy/verify-firewall-in-docker.sh
+```
+
+It runs `internal/agent` and `internal/ipsetsync` against a real kernel inside a
+privileged throwaway container. What it proves that no test on macOS can:
+
+- Every rule in `FirewallRules` is accepted, **and found again by `iptables -C`**.
+  The check compares the whole spec, so a rule the kernel stores differently
+  from how it was given is never matched, and the agent inserts a duplicate on
+  every poll until the chain is thousands of rules long.
+- Re-asserting three times in a row leaves every chain the same length.
+- The FORWARD policy really is DROP afterwards. An ACCEPT policy makes every
+  rule above it decoration and turns the relay into an open proxy.
+- The ipset swap replaces rather than accumulates, and leaves no temporary set
+  behind — one leaked per publish eventually fills the kernel's set table, and
+  the failure lands on a contributor's machine days later with no obvious cause.
+- Whatever ipset rewrites on the way in, the set never permits an address the
+  profile did not name.
+
+Verified against iptables 1.8.9 (nf_tables) and ipset 7.17.
+
 ## 1. Control plane
 
 Needs Postgres, a public HTTPS endpoint, and nothing else. It is not on the data
