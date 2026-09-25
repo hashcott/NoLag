@@ -160,6 +160,9 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          # Surface the failure as an annotation, which the run's summary shows
+          # without anyone opening the log.
+          trap { Write-Host "::error title=installer test::$($_.Exception.Message)"; break }
           $setup = (Get-ChildItem dist\GameNoLag-Setup-*.exe).FullName
           $common = '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
 
@@ -231,7 +234,12 @@ jobs:
         shell: pwsh
         run: |
           foreach ($f in 'bad-key.log', 'bad-url.log', 'setup.log', 'uninstall.log', "$env:ProgramData\GameNoLag\service.log") {
-            if (Test-Path $f) { Write-Host "===== $f"; Get-Content $f -Tail 80 }
+            if (Test-Path $f) {
+              Write-Host "===== $f"; Get-Content $f -Tail 80
+              # One annotation per log, newlines encoded as the runner expects.
+              $tail = (Get-Content $f -Tail 25) -join '%0A'
+              Write-Host "::warning title=$(Split-Path $f -Leaf)::$tail"
+            }
           }
           Get-Service GameNoLag -ErrorAction SilentlyContinue | Format-List * | Out-String | Write-Host
       - uses: actions/upload-artifact@v4
