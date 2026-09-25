@@ -124,6 +124,7 @@ jobs:
     # runs the client as a Windows service.
     needs: build
     runs-on: windows-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -162,15 +163,30 @@ jobs:
           $setup = (Get-ChildItem dist\GameNoLag-Setup-*.exe).FullName
           $common = '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
 
-          # A key that is not a key is refused before anything is written.
-          $p = Start-Process $setup -ArgumentList ($common + '/KEY=not;a-key', '/URL=https://example.invalid') -Wait -PassThru
-          if ($p.ExitCode -eq 0) { throw "setup accepted an invalid key" }
-          if (Get-Service GameNoLag -ErrorAction SilentlyContinue) { throw "installed with an invalid key" }
-          $p = Start-Process $setup -ArgumentList ($common + '/KEY=GNL-TEST-TEST-TEST-TEST', '/URL=http://example.invalid') -Wait -PassThru
-          if ($p.ExitCode -eq 0) { throw "setup accepted a plain-http control URL" }
+          # Every wait is bounded and says what it was waiting for. A setup that
+          # blocks on a dialog nobody can see would otherwise hold the runner for
+          # hours and report nothing.
+          function Run-Bounded($file, $arguments, $what, $seconds = 300) {
+            Write-Host "==> $what"
+            $p = Start-Process $file -ArgumentList $arguments -PassThru
+            if (-not $p.WaitForExit($seconds * 1000)) {
+              Get-Process | Where-Object { $_.ProcessName -match 'setup|unins|_iu|powershell|pwsh|gnl' } |
+                Format-Table Id, ProcessName, StartTime -AutoSize | Out-String | Write-Host
+              throw "$what did not finish within $seconds s"
+            }
+            return $p.ExitCode
+          }
 
-          $p = Start-Process $setup -ArgumentList ($common + '/KEY=GNL-TEST-TEST-TEST-TEST', '/URL=https://example.invalid', '/LOG=setup.log') -Wait -PassThru
-          if ($p.ExitCode -ne 0) { Get-Content setup.log; throw "setup exited $($p.ExitCode)" }
+          # A key that is not a key, and a plain-http address, are refused before
+          # anything is written.
+          $code = Run-Bounded $setup ($common + '/KEY=not;a-key', '/URL=https://example.invalid', '/LOG=bad-key.log') 'setup with an invalid key'
+          if ($code -eq 0) { throw "setup accepted an invalid key" }
+          if (Get-Service GameNoLag -ErrorAction SilentlyContinue) { throw "installed with an invalid key" }
+          $code = Run-Bounded $setup ($common + '/KEY=GNL-TEST-TEST-TEST-TEST', '/URL=http://example.invalid', '/LOG=bad-url.log') 'setup with a plain-http address'
+          if ($code -eq 0) { throw "setup accepted a plain-http control URL" }
+
+          $code = Run-Bounded $setup ($common + '/KEY=GNL-TEST-TEST-TEST-TEST', '/URL=https://example.invalid', '/LOG=setup.log') 'setup'
+          if ($code -ne 0) { throw "setup exited $code" }
 
           $svc = Get-Service GameNoLag
           if ($svc.Status -ne 'Running') { throw "service is $($svc.Status)" }
@@ -186,14 +202,16 @@ jobs:
 
           # The pipe answers status, and refuses anything outside the four verbs.
           function Ask($line) {
+            Write-Host "==> pipe: $line"
             $pipe = New-Object System.IO.Pipes.NamedPipeClientStream('.', 'GameNoLag', [System.IO.Pipes.PipeDirection]::InOut)
             $pipe.Connect(15000)
             $w = New-Object System.IO.StreamWriter($pipe); $w.AutoFlush = $true
             $r = New-Object System.IO.StreamReader($pipe)
-            $w.WriteLine($line)
-            $reply = $r.ReadLine()
+            $w.Write("$line`n")
+            $read = $r.ReadLineAsync()
+            if (-not $read.Wait(30000)) { $pipe.Dispose(); throw "no answer on the pipe to $line" }
             $pipe.Dispose()
-            return $reply | ConvertFrom-Json
+            return $read.Result | ConvertFrom-Json
           }
           $status = Ask '{"verb":"status"}'
           if ($status.state -ne 'disconnected') { throw "status replied $($status | ConvertTo-Json -Compress)" }
@@ -202,12 +220,20 @@ jobs:
 
           # Uninstall. The uninstaller hands over to a copy of itself, so wait for
           # the effect rather than the process.
-          Start-Process "$env:ProgramFiles\GameNoLag\unins000.exe" -ArgumentList $common -Wait
+          $null = Run-Bounded "$env:ProgramFiles\GameNoLag\unins000.exe" ($common + '/LOG=uninstall.log') 'uninstall'
           for ($i = 0; $i -lt 60 -and (Get-Service GameNoLag -ErrorAction SilentlyContinue); $i++) { Start-Sleep 1 }
           if (Get-Service GameNoLag -ErrorAction SilentlyContinue) { throw "service survived uninstall" }
           if (Test-Path "$env:ProgramFiles\GameNoLag\gnl-service.exe") { throw "binary survived uninstall" }
           if (-not (Test-Path "$env:ProgramData\GameNoLag\device.key")) { throw "uninstall removed the device identity" }
           Write-Host "installer: refused bad input, installed, answered on the pipe, uninstalled cleanly"
+      - name: what the machine looked like
+        if: failure()
+        shell: pwsh
+        run: |
+          foreach ($f in 'bad-key.log', 'bad-url.log', 'setup.log', 'uninstall.log', "$env:ProgramData\GameNoLag\service.log") {
+            if (Test-Path $f) { Write-Host "===== $f"; Get-Content $f -Tail 80 }
+          }
+          Get-Service GameNoLag -ErrorAction SilentlyContinue | Format-List * | Out-String | Write-Host
       - uses: actions/upload-artifact@v4
         with:
           name: gamenolag-setup
